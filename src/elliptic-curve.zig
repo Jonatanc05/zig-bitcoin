@@ -7,6 +7,12 @@ pub const CurvePoint = struct {
     a: f64,
     b: f64,
 
+    pub fn format(self: CurvePoint, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+        _ = fmt;
+        _ = options;
+        try writer.print("({}, {})", .{ self.x, self.y });
+    }
+
     pub fn init(x: f64, y: f64, a: f64, b: f64) CurvePoint {
         if (x == inf or y == inf) {
             std.debug.assert(x == y);

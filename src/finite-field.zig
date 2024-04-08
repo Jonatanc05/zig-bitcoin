@@ -4,6 +4,12 @@ pub const FieldElement = struct {
     value: i64,
     prime: i64,
 
+    pub fn format(self: FieldElement, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+        _ = fmt;
+        _ = options;
+        try writer.print("{}_F{}", .{ self.value, self.prime });
+    }
+
     pub fn init(value: i64, prime: i64) FieldElement {
         std.debug.assert(value < prime and value >= 0);
         return FieldElement{ .value = value, .prime = prime };

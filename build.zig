@@ -16,7 +16,7 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     const exe = b.addExecutable(.{
-        .name = "zigimp",
+        .name = "zig-bitcoin",
         .root_source_file = .{ .path = "src/main.zig" },
         .target = target,
         .optimize = optimize,
@@ -47,14 +47,29 @@ pub fn build(b: *std.Build) void {
     // This will evaluate the `run` step rather than the default, which is "install".
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
-    const exe_unit_tests = b.addTest(.{
+
+    // ------------ TESTS ------------
+
+    const run_exe_unit_tests = b.addRunArtifact(b.addTest(.{
         .root_source_file = .{ .path = "src/main.zig" },
         .target = target,
         .optimize = optimize,
-    });
+    }));
 
-    const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
+    const run_finite_field_unit_tests = b.addRunArtifact(b.addTest(.{
+        .root_source_file = .{ .path = "src/finite-field.zig" },
+        .target = target,
+        .optimize = optimize,
+    }));
+
+    const run_elliptic_curve_unit_tests = b.addRunArtifact(b.addTest(.{
+        .root_source_file = .{ .path = "src/elliptic-curve.zig" },
+        .target = target,
+        .optimize = optimize,
+    }));
 
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_exe_unit_tests.step);
+    test_step.dependOn(&run_finite_field_unit_tests.step);
+    test_step.dependOn(&run_elliptic_curve_unit_tests.step);
 }

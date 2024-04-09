@@ -33,6 +33,9 @@ pub const FieldElement = struct {
         std.debug.assert(self.prime == other.prime);
         return FieldElement.init(@mod((self.value * other.value), self.prime), self.prime);
     }
+    pub fn muli(self: FieldElement, otherRaw: i64) FieldElement {
+        return FieldElement.init(@mod((self.value * otherRaw), self.prime), self.prime);
+    }
 
     pub fn pow(self: FieldElement, exponent: i64) FieldElement {
         var exp = @mod(exponent, self.prime - 1);

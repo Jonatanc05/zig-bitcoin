@@ -1,30 +1,30 @@
 const std = @import("std");
-const inf = std.math.inf(f64);
+const FieldElement = @import("finite-field.zig").FieldElement;
 
 pub const CurvePoint = struct {
-    x: f64,
-    y: f64,
-    a: f64,
-    b: f64,
+    x: ?FieldElement,
+    y: ?FieldElement,
+    a: FieldElement,
+    b: FieldElement,
 
     pub fn format(self: CurvePoint, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
         _ = fmt;
         _ = options;
-        try writer.print("({}, {})", .{ self.x, self.y });
+        if (self.atInfinity()) try writer.print("(inf, inf)", .{});
+        try writer.print("({}, {})", .{ self.x.?, self.y.? });
     }
 
-    pub fn init(x: f64, y: f64, a: f64, b: f64) CurvePoint {
-        if (x == inf or y == inf) {
-            std.debug.assert(x == y);
-            return CurvePoint{
-                .x = x,
-                .y = y,
-                .a = a,
-                .b = b,
-            };
+    pub fn init(x: ?FieldElement, y: ?FieldElement, a: FieldElement, b: FieldElement) CurvePoint {
+        std.debug.assert(a.prime == b.prime);
+        if (x == null or y == null) {
+            std.debug.assert(x == null and y == null);
+        } else {
+            std.debug.assert(x.?.prime == y.?.prime and y.?.prime == a.prime);
+
+            //                    y^2  =   x^3       +   a*x       +  b
+            std.debug.assert(y.?.mul(y.?).eq(x.?.pow(3).add(a.mul(x.?)).add(b)));
         }
 
-        std.debug.assert(y * y == x * x * x + a * x + b);
         return CurvePoint{
             .x = x,
             .y = y,
@@ -34,74 +34,74 @@ pub const CurvePoint = struct {
     }
 
     pub fn atInfinity(self: CurvePoint) bool {
-        const atInf: bool = (self.x == inf or self.y == inf);
-        if (atInf) std.debug.assert(self.x == self.y);
-        return atInf;
+        if (self.x == null or self.y == null) {
+            std.debug.assert(self.x == null and self.y == null);
+            return true;
+        }
+        return false;
     }
 
     pub fn eq(self: CurvePoint, other: CurvePoint) bool {
-        std.debug.assert(self.a == other.a or self.b == other.b);
-        return self.x == other.x and self.y == other.y;
+        std.debug.assert(self.a.eq(other.a) or self.b.eq(other.b));
+        if (self.atInfinity()) return other.atInfinity();
+        return self.x.?.eq(other.x.?) and self.y.?.eq(other.y.?);
     }
 
     pub fn add(self: CurvePoint, other: CurvePoint) CurvePoint {
-        std.debug.assert(self.a == other.a and self.b == other.b);
+        std.debug.assert(self.a.eq(other.a) and self.b.eq(other.b));
 
         if (self.atInfinity()) return other;
         if (other.atInfinity()) return self;
 
-        if (self.x == other.x) {
-            if (self.y == other.y) {
-                if (self.y == 0) return CurvePoint.init(inf, inf, self.a, self.b);
-                const s = (3 * self.x * self.x + self.a) / (2 * self.y);
-                const x = s * s - self.x - other.x;
-                const y = s * (x - self.x) + self.y;
-                return CurvePoint.init(x, y, self.a, self.b);
-            } else if (self.y == -other.y) {
-                return CurvePoint.init(inf, inf, self.a, self.b);
+        const x1 = self.x.?;
+        const y1 = self.y.?;
+        const x2 = other.x.?;
+        const y2 = other.y.?;
+        if (x1.eq(x2)) {
+            if (y1.eq(y2)) {
+                if (y1.value == 0) return CurvePoint.init(null, null, self.a, self.b);
+                const s = x1.mul(x1).muli(3).add(self.a).div(y1.muli(2));
+                const x3 = s.mul(s).sub(x1).sub(x2);
+                const y3 = s.mul(x1.sub(x3)).sub(y1);
+                return CurvePoint.init(x3, y3, self.a, self.b);
+            } else if (y1.value == -y2.value) {
+                unreachable;
+                // This does not make sense since working with Finite Fields
+                //return CurvePoint.init(null, null, self.a, self.b);
             } else unreachable;
         }
 
-        const s = (other.y - self.y) / (other.x - self.x);
-        const x = s * s - self.x - other.x;
-        const y = s * (x - self.x) + self.y;
-        return CurvePoint.init(x, y, self.a, self.b);
+        const s = y2.sub(y1).div(x2.sub(x1));
+        const x3 = s.mul(s).sub(x1).sub(x2);
+        const y3 = s.mul(x1.sub(x3)).sub(y1);
+        return CurvePoint.init(x3, y3, self.a, self.b);
     }
 };
 
-// --------------------- TESTS -------------------------------------
+// --------------- TESTS ---------------
 
-const expect = @import("std").testing.expect;
+const expect = std.testing.expect;
 
-test "point at infinity" {
-    const I = CurvePoint.init(inf, inf, 5, 7);
-    try expect(I.x == inf);
-    try expect(I.y == inf);
+var _prime: i64 = 223;
+fn fe(value: i64) FieldElement {
+    return FieldElement.init(value, _prime);
 }
 
-test "point at inf sum (invertibility)" {
-    const p1 = CurvePoint.init(-1, -1, 5, 7);
-    const p2 = CurvePoint.init(-1, 1, 5, 7);
-    const I = CurvePoint.init(inf, inf, 5, 7);
-    try expect(p1.add(I).eq(p1));
-    try expect(I.add(p2).eq(CurvePoint.init(-1, 1, 5, 7)));
-    try expect(p1.add(p2).eq(CurvePoint.init(inf, inf, 5, 7)));
+test "init points that shold be on the curve" {
+    _prime = 223;
+    _ = CurvePoint.init(fe(192), fe(105), fe(0), fe(7));
+    _ = CurvePoint.init(fe(17), fe(56), fe(0), fe(7));
+    _ = CurvePoint.init(fe(1), fe(193), fe(0), fe(7));
 }
 
-test "sum" {
-    const a = CurvePoint.init(2, 5, 5, 7);
-    const b = CurvePoint.init(-1, -1, 5, 7);
-    try expect(a.add(b).eq(CurvePoint.init(3, 7, 5, 7)));
-}
-
-test "sum equal points" {
-    const a = CurvePoint.init(-1, -1, 5, 7);
-    const b = CurvePoint.init(-1, -1, 5, 7);
-    try expect(a.add(b).eq(CurvePoint.init(18, -77, 5, 7)));
-}
-
-test "sum equal points at y=0" {
-    const a = CurvePoint.init(0, 0, 5, 0);
-    const b = CurvePoint.init(0, 0, 5, 0);
-    try expect(a.add(b).eq(CurvePoint.init(inf, inf, 5, 7)));
+test "point addition" {
+    _prime = 223;
+    const a = fe(0);
+    const b = fe(7);
+    const p1 = CurvePoint.init(fe(192), fe(105), a, b);
+    const p2 = CurvePoint.init(fe(17), fe(56), a, b);
+    try expect(p1.add(p2).eq(CurvePoint.init(fe(170), fe(142), a, b)));
+    try expect(CurvePoint.init(fe(170), fe(142), a, b).add(CurvePoint.init(fe(60), fe(139), a, b)).eq(CurvePoint.init(fe(220), fe(181), a, b)));
+    try expect(CurvePoint.init(fe(47), fe(71), a, b).add(CurvePoint.init(fe(17), fe(56), a, b)).eq(CurvePoint.init(fe(215), fe(68), a, b)));
+    try expect(CurvePoint.init(fe(143), fe(98), a, b).add(CurvePoint.init(fe(76), fe(66), a, b)).eq(CurvePoint.init(fe(47), fe(71), a, b)));
 }

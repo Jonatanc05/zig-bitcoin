@@ -32,5 +32,14 @@ pub fn main() !void {
         std.debug.print("Point p1: {}\n", .{p1});
         std.debug.print("Point p2: {}\n", .{p2});
         std.debug.print("p1 + p2: {}\n", .{p1.add(p2)});
+        const p3 = CurvePoint.init(fe(47), fe(71), a, b);
+        std.debug.print("Point p3: {}\n", .{p3});
+        std.debug.print("p3 + p3: {}\n", .{p3.add(p3)});
+        std.debug.print("2 p3: {}\n", .{p3.mul(2)});
+        std.debug.print("3 p3: {}\n", .{p3.mul(3)});
+        std.debug.print("18 p3: {}\n", .{p3.mul(18)});
+        std.debug.print("19 p3: {}\n", .{p3.mul(19)});
+        std.debug.print("20 p3: {}\n", .{p3.mul(20)});
+        std.debug.print("21 p3: {}\n", .{p3.mul(21)});
     }
 }

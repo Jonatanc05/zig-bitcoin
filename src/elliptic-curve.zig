@@ -10,7 +10,10 @@ pub const CurvePoint = struct {
     pub fn format(self: CurvePoint, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
         _ = fmt;
         _ = options;
-        if (self.atInfinity()) try writer.print("(inf, inf)", .{});
+        if (self.atInfinity()) {
+            try writer.print("(inf, inf)", .{});
+            return;
+        }
         try writer.print("({}, {})", .{ self.x.?, self.y.? });
     }
 

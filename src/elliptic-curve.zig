@@ -66,15 +66,26 @@ pub const CurvePoint = struct {
                 return CurvePoint.init(x3, y3, self.a, self.b);
             } else if (y1.value == -y2.value) {
                 unreachable;
-                // This does not make sense since working with Finite Fields
+                // This case does not make sense since we started working with Finite Fields
                 //return CurvePoint.init(null, null, self.a, self.b);
-            } else unreachable;
+            } else return CurvePoint.init(null, null, self.a, self.b);
         }
 
         const s = y2.sub(y1).div(x2.sub(x1));
         const x3 = s.mul(s).sub(x1).sub(x2);
         const y3 = s.mul(x1.sub(x3)).sub(y1);
         return CurvePoint.init(x3, y3, self.a, self.b);
+    }
+
+    pub fn mul(self: CurvePoint, scalar: FieldElement) CurvePoint {
+        std.debug.assert(scalar.prime == self.a.prime);
+        if (self.atInfinity()) return CurvePoint.init(null, null, self.a, self.b);
+
+        var result = CurvePoint.init(null, null, self.a, self.b);
+        var i: usize = 0;
+        while (i < scalar.value) : (i += 1)
+            result = result.add(self);
+        return result;
     }
 };
 
@@ -104,4 +115,19 @@ test "point addition" {
     try expect(CurvePoint.init(fe(170), fe(142), a, b).add(CurvePoint.init(fe(60), fe(139), a, b)).eq(CurvePoint.init(fe(220), fe(181), a, b)));
     try expect(CurvePoint.init(fe(47), fe(71), a, b).add(CurvePoint.init(fe(17), fe(56), a, b)).eq(CurvePoint.init(fe(215), fe(68), a, b)));
     try expect(CurvePoint.init(fe(143), fe(98), a, b).add(CurvePoint.init(fe(76), fe(66), a, b)).eq(CurvePoint.init(fe(47), fe(71), a, b)));
+}
+
+test "scalar multiplication" {
+    _prime = 223;
+    const a = fe(0);
+    const b = fe(7);
+    const p1 = CurvePoint.init(fe(192), fe(105), a, b);
+    const p2 = CurvePoint.init(fe(143), fe(98), a, b);
+    const p3 = CurvePoint.init(fe(47), fe(71), a, b);
+    try expect(p1.mul(fe(2)).eq(CurvePoint.init(fe(49), fe(71), a, b)));
+    try expect(p2.mul(fe(2)).eq(CurvePoint.init(fe(64), fe(168), a, b)));
+    try expect(p3.mul(fe(2)).eq(CurvePoint.init(fe(36), fe(111), a, b)));
+    try expect(p3.mul(fe(4)).eq(CurvePoint.init(fe(194), fe(51), a, b)));
+    try expect(p3.mul(fe(8)).eq(CurvePoint.init(fe(116), fe(55), a, b)));
+    try expect(p3.mul(fe(21)).atInfinity());
 }

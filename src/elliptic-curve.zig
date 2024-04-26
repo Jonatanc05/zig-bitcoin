@@ -1,5 +1,7 @@
 const std = @import("std");
-const FieldElement = @import("finite-field.zig").FieldElement;
+const FieldElementLib = @import("finite-field.zig");
+const FieldElement = FieldElementLib.FieldElement;
+const assert = std.debug.assert;
 
 pub const CurvePoint = struct {
     x: ?FieldElement,
@@ -18,14 +20,14 @@ pub const CurvePoint = struct {
     }
 
     pub fn init(x: ?FieldElement, y: ?FieldElement, a: FieldElement, b: FieldElement) CurvePoint {
-        std.debug.assert(a.prime == b.prime);
+        assert(a.prime == b.prime);
         if (x == null or y == null) {
-            std.debug.assert(x == null and y == null);
+            assert(x == null and y == null);
         } else {
-            std.debug.assert(x.?.prime == y.?.prime and y.?.prime == a.prime);
+            assert(x.?.prime == y.?.prime and y.?.prime == a.prime);
 
-            //                    y^2  =   x^3       +   a*x       +  b
-            std.debug.assert(y.?.mul(y.?).eq(x.?.pow(3).add(a.mul(x.?)).add(b)));
+            // y^2 = x^3 + a * x + b
+            assert(y.?.mul(y.?).eq(x.?.pow(3).add(a.mul(x.?)).add(b)));
         }
 
         return CurvePoint{
@@ -38,20 +40,20 @@ pub const CurvePoint = struct {
 
     pub fn atInfinity(self: CurvePoint) bool {
         if (self.x == null or self.y == null) {
-            std.debug.assert(self.x == null and self.y == null);
+            assert(self.x == null and self.y == null);
             return true;
         }
         return false;
     }
 
     pub fn eq(self: CurvePoint, other: CurvePoint) bool {
-        std.debug.assert(self.a.eq(other.a) or self.b.eq(other.b));
+        assert(self.a.eq(other.a) or self.b.eq(other.b));
         if (self.atInfinity()) return other.atInfinity();
         return self.x.?.eq(other.x.?) and self.y.?.eq(other.y.?);
     }
 
     pub fn add(self: CurvePoint, other: CurvePoint) CurvePoint {
-        std.debug.assert(self.a.eq(other.a) and self.b.eq(other.b));
+        assert(self.a.eq(other.a) and self.b.eq(other.b));
         if (self.atInfinity()) return other;
         if (other.atInfinity()) return self;
 
@@ -66,10 +68,6 @@ pub const CurvePoint = struct {
                 const x3 = s.mul(s).sub(x1).sub(x2);
                 const y3 = s.mul(x1.sub(x3)).sub(y1);
                 return CurvePoint.init(x3, y3, self.a, self.b);
-            } else if (y1.value == -y2.value) {
-                unreachable;
-                // This case does not make sense since we started working with Finite Fields
-                //return CurvePoint.init(null, null, self.a, self.b);
             } else return CurvePoint.init(null, null, self.a, self.b);
         }
 
@@ -79,7 +77,7 @@ pub const CurvePoint = struct {
         return CurvePoint.init(x3, y3, self.a, self.b);
     }
 
-    pub fn mul(self: CurvePoint, scalar: u64) CurvePoint {
+    pub fn mul(self: CurvePoint, scalar: FieldElementLib.NumberType) CurvePoint {
         if (self.atInfinity()) return CurvePoint.init(null, null, self.a, self.b);
 
         var result = CurvePoint.init(null, null, self.a, self.b);
@@ -98,20 +96,17 @@ pub const CurvePoint = struct {
 
 const expect = std.testing.expect;
 
-var _prime: i64 = 223;
-fn fe(value: i64) FieldElement {
-    return FieldElement.init(value, _prime);
-}
+const fe = FieldElementLib.fieldElementShortcut;
 
 test "init points that shold be on the curve" {
-    _prime = 223;
+    FieldElementLib.setGlobalPrime(223);
     _ = CurvePoint.init(fe(192), fe(105), fe(0), fe(7));
     _ = CurvePoint.init(fe(17), fe(56), fe(0), fe(7));
     _ = CurvePoint.init(fe(1), fe(193), fe(0), fe(7));
 }
 
 test "point addition" {
-    _prime = 223;
+    FieldElementLib.setGlobalPrime(223);
     const a = fe(0);
     const b = fe(7);
     const p1 = CurvePoint.init(fe(192), fe(105), a, b);
@@ -123,7 +118,7 @@ test "point addition" {
 }
 
 test "scalar multiplication" {
-    _prime = 223;
+    FieldElementLib.setGlobalPrime(223);
     const a = fe(0);
     const b = fe(7);
     const p1 = CurvePoint.init(fe(192), fe(105), a, b);

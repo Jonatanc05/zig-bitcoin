@@ -1,7 +1,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 
-pub const NumberType = u256;
+pub const NumberType = u512;
 pub const FieldElement = struct {
     value: NumberType,
     prime: NumberType,

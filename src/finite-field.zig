@@ -2,6 +2,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 
 pub const NumberType = u512;
+pub const HalfNumberType = u256;
 pub const FieldElement = struct {
     value: NumberType,
     prime: NumberType,
@@ -58,7 +59,11 @@ pub const FieldElement = struct {
 
     pub fn div(self: Self, other: Self) Self {
         assert(self.prime == other.prime);
-        return self.mul(other.pow(self.prime - 2));
+        return self.mul(other.inv());
+    }
+
+    pub fn inv(self: Self) Self {
+        return self.pow(self.prime - 2);
     }
 };
 
@@ -126,4 +131,13 @@ test "modulo div" {
     const a = FieldElement.init(3, 31);
     const b = FieldElement.init(24, 31);
     try expect(a.div(b).eq(FieldElement.init(4, 31)));
+}
+
+test "inv" {
+    const a = FieldElement.init(17, 31);
+    try expect(a.inv().eq(FieldElement.init(11, 31)));
+    const b = FieldElement.init(472, 587);
+    try expect(b.inv().eq(FieldElement.init(245, 587)));
+    const c = FieldElement.init(2358, 7919);
+    try expect(c.inv().eq(FieldElement.init(6532, 7919)));
 }

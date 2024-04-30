@@ -8,6 +8,7 @@ pub const CurvePoint = struct {
     y: ?FieldElement,
     a: FieldElement,
     b: FieldElement,
+    order: ?FieldElementLib.NumberType = null,
 
     pub fn format(self: CurvePoint, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
         _ = fmt;
@@ -16,7 +17,7 @@ pub const CurvePoint = struct {
             try writer.print("(inf, inf)", .{});
             return;
         }
-        try writer.print("({}, {})", .{ self.x.?, self.y.? });
+        try writer.print("({x}, {x})", .{ self.x.?.value, self.y.?.value });
     }
 
     pub fn init(x: ?FieldElement, y: ?FieldElement, a: FieldElement, b: FieldElement) CurvePoint {
@@ -77,18 +78,30 @@ pub const CurvePoint = struct {
         return CurvePoint.init(x3, y3, self.a, self.b);
     }
 
-    pub fn mul(self: CurvePoint, scalar: FieldElementLib.NumberType) CurvePoint {
+    pub fn muli(self: CurvePoint, scalar: FieldElementLib.NumberType) CurvePoint {
         if (self.atInfinity()) return CurvePoint.init(null, null, self.a, self.b);
 
         var result = CurvePoint.init(null, null, self.a, self.b);
         var adder = self;
-        var scalarVar = scalar;
+        var scalarVar = if (self.order != null) scalar % self.order.? else scalar;
         while (scalarVar != 0) : (scalarVar >>= 1) {
             if ((scalarVar & 1) != 0)
                 result = result.add(adder);
             adder = adder.add(adder);
         }
         return result;
+    }
+    pub fn mul(self: CurvePoint, scalar: FieldElement) CurvePoint {
+        return self.muli(scalar.value);
+    }
+
+    pub fn computeOrder(self: *CurvePoint) void {
+        var it = self.*;
+        var i: FieldElementLib.NumberType = 1;
+        self.order = while (true) : (i += 1) {
+            it = it.add(self.*);
+            if (it.atInfinity()) break i + 1;
+        };
     }
 };
 
@@ -124,11 +137,11 @@ test "scalar multiplication" {
     const p1 = CurvePoint.init(fe(192), fe(105), a, b);
     const p2 = CurvePoint.init(fe(143), fe(98), a, b);
     const p3 = CurvePoint.init(fe(47), fe(71), a, b);
-    try expect(p1.mul(2).eq(p1.add(p1)));
-    try expect(p1.mul(2).eq(CurvePoint.init(fe(49), fe(71), a, b)));
-    try expect(p2.mul(2).eq(CurvePoint.init(fe(64), fe(168), a, b)));
-    try expect(p3.mul(2).eq(CurvePoint.init(fe(36), fe(111), a, b)));
-    try expect(p3.mul(4).eq(CurvePoint.init(fe(194), fe(51), a, b)));
-    try expect(p3.mul(8).eq(CurvePoint.init(fe(116), fe(55), a, b)));
-    try expect(p3.mul(21).atInfinity());
+    try expect(p1.muli(2).eq(p1.add(p1)));
+    try expect(p1.muli(2).eq(CurvePoint.init(fe(49), fe(71), a, b)));
+    try expect(p2.muli(2).eq(CurvePoint.init(fe(64), fe(168), a, b)));
+    try expect(p3.muli(2).eq(CurvePoint.init(fe(36), fe(111), a, b)));
+    try expect(p3.muli(4).eq(CurvePoint.init(fe(194), fe(51), a, b)));
+    try expect(p3.muli(8).eq(CurvePoint.init(fe(116), fe(55), a, b)));
+    try expect(p3.muli(21).atInfinity());
 }

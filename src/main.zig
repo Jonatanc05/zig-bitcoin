@@ -51,14 +51,15 @@ pub fn main() !void {
 
     std.debug.print("-------------- Cryptography --------------\n", .{});
     {
-        FieldElementLib.setGlobalPrime(CryptLib.secp256k1_p);
-        var G = CryptLib.G;
-        G.order = CryptLib.secp256k1_n;
-        const z = 0x231c6f3d980a6b0fb7152f85cee7eb52bf92433d9919b9c5218cb08e79cce78;
-        const e = 0x8b387de39861728c92ec9f589c303b1038ff60eb3963b12cd212263a1d1e0f00;
+        const message = "The quick brown fox jumps over the lazy dog";
+        std.debug.print("message: \"{s}\"\n", .{message});
+        const z = CryptLib.hash(message);
+        std.debug.print("h(message): {x}\n", .{z});
+        const keys = CryptLib.generateKeyPair();
+        std.debug.print("Public key: {}\nPrivate key: {x}\n", .{ keys.pubk, keys.prvk });
         std.debug.print("Signing the message...\n", .{});
-        const sig = CryptLib.sign(z, e);
+        const sig = CryptLib.sign(z, keys.prvk);
         std.debug.print("Verifying the signature...\n", .{});
-        std.debug.print("valid: {}\n", .{CryptLib.verify(z, G.muli(e), sig)});
+        std.debug.print("valid: {}\n", .{CryptLib.verify(z, keys.pubk, sig)});
     }
 }

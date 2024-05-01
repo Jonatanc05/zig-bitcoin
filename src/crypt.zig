@@ -25,15 +25,21 @@ pub const Signature = struct {
     s: NumberType,
 };
 
-pub fn generateKeyPair() struct { P: CurvePoint, e: NumberType } {
-    const e = randomizer.random().int(HalfNumberType);
-    const P = G.muli(e);
-    return .{ .P = P, .e = e };
+pub fn hash(message: []const u8) HalfNumberType {
+    const bytesInHalfNumberType: comptime_int = @divExact(@typeInfo(HalfNumberType).Int.bits, 8);
+    var z_bytes: [bytesInHalfNumberType]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(message, z_bytes[0..bytesInHalfNumberType], .{});
+    return std.mem.readInt(HalfNumberType, &z_bytes, std.builtin.Endian.little);
 }
 
-/// CRYPTOGRAPHICALLY UNSAFE. @TODO: use RFC 6979
+pub fn generateKeyPair() struct { pubk: CurvePoint, prvk: NumberType } {
+    const e = @as(NumberType, std.crypto.random.int(HalfNumberType));
+    const P = G.muli(e);
+    return .{ .pubk = P, .prvk = e };
+}
+
 pub fn sign(z: NumberType, e: NumberType) Signature {
-    const k = randomizer.random().int(HalfNumberType);
+    const k = @as(NumberType, std.crypto.random.int(HalfNumberType));
     const r = G.muli(k).x.?.value;
     const k_inv = modpow(k, secp256k1_n - 2, secp256k1_n);
     const s = @mod(@mod((z + @mod(r * e, secp256k1_n)), secp256k1_n) * k_inv, secp256k1_n);
@@ -46,8 +52,6 @@ pub fn verify(z: NumberType, P: CurvePoint, sig: Signature) bool {
     const v = @mod(sig.r * s_inv, secp256k1_n);
     return G.muli(u).add(P.muli(v)).x.?.value == sig.r;
 }
-
-var randomizer = std.Random.Xoshiro256.init(0);
 
 fn modpow(base: NumberType, exponent: NumberType, modulo: NumberType) NumberType {
     var base_mod = @mod(base, modulo);
@@ -75,14 +79,9 @@ test "order of G is indeed n" {
 }
 
 test "signing message" {
-    // Mock hash of a hypothetical message
-    const z = 0x231c6f3d980a6b0fb7152f85cee7eb52bf92433d9919b9c5218cb08e79cce78;
-    // Signing (hypothetical private key)
     const keys = generateKeyPair();
-    const e = keys.e;
-    const P = keys.P;
-
-    const signature: Signature = sign(z, e);
-    const valid = verify(z, P, signature);
+    const z = hash("my message");
+    const signature: Signature = sign(z, keys.prvk);
+    const valid = verify(z, keys.pubk, signature);
     try expect(valid);
 }

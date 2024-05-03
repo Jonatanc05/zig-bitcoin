@@ -111,7 +111,7 @@ const expect = std.testing.expect;
 
 const fe = FieldElementLib.fieldElementShortcut;
 
-test "init points that shold be on the curve" {
+test "init points that should be on the curve" {
     FieldElementLib.setGlobalPrime(223);
     _ = CurvePoint.init(fe(192), fe(105), fe(0), fe(7));
     _ = CurvePoint.init(fe(17), fe(56), fe(0), fe(7));

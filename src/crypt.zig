@@ -2,7 +2,7 @@ const std = @import("std");
 const FieldElementLib = @import("finite-field.zig");
 const FieldElement = FieldElementLib.FieldElement;
 const NumberType = FieldElementLib.NumberType;
-const HalfNumberType = FieldElementLib.HalfNumberType;
+const MulExtendedNumberType = FieldElementLib.MulExtendedNumberType;
 const fe = FieldElementLib.fieldElementShortcut;
 const CurvePoint = @import("elliptic-curve.zig").CurvePoint;
 const secp256k1_a = 0;
@@ -25,44 +25,72 @@ pub const Signature = struct {
     s: NumberType,
 };
 
-pub fn hash(message: []const u8) HalfNumberType {
-    const bytesInHalfNumberType: comptime_int = @divExact(@typeInfo(HalfNumberType).Int.bits, 8);
-    var z_bytes: [bytesInHalfNumberType]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(message, z_bytes[0..bytesInHalfNumberType], .{});
-    return std.mem.readInt(HalfNumberType, &z_bytes, std.builtin.Endian.little);
+pub fn hash(message: []const u8) NumberType {
+    const bytesInNumberType: comptime_int = @divExact(@typeInfo(NumberType).Int.bits, 8);
+    var z_bytes: [bytesInNumberType]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(message, z_bytes[0..bytesInNumberType], .{});
+    return std.mem.readInt(NumberType, &z_bytes, std.builtin.Endian.big);
 }
 
 pub fn generateKeyPair() struct { pubk: CurvePoint, prvk: NumberType } {
-    const e = @as(NumberType, std.crypto.random.int(HalfNumberType));
+    const e = std.crypto.random.int(NumberType);
     const P = G.muli(e);
     return .{ .pubk = P, .prvk = e };
 }
 
 pub fn sign(z: NumberType, e: NumberType) Signature {
-    const k = @as(NumberType, std.crypto.random.int(HalfNumberType));
+    const k = std.crypto.random.int(NumberType);
     const r = G.muli(k).x.?.value;
     const k_inv = modpow(k, secp256k1_n - 2, secp256k1_n);
-    const s = @mod(@mod((z + @mod(r * e, secp256k1_n)), secp256k1_n) * k_inv, secp256k1_n);
+    const s: NumberType = s_calc: { // s = (r * e + z) * k_inv (mod n)
+        var temp: MulExtendedNumberType = r;
+        temp = temp * e;
+        temp = @mod(temp, secp256k1_n);
+        temp = temp + z;
+        temp = @mod(temp, secp256k1_n);
+        temp = temp * k_inv;
+        temp = @mod(temp, secp256k1_n);
+        break :s_calc @intCast(temp);
+    };
     return Signature{ .r = r, .s = s };
 }
 
 pub fn verify(z: NumberType, P: CurvePoint, sig: Signature) bool {
     const s_inv = modpow(sig.s, secp256k1_n - 2, secp256k1_n);
-    const u = @mod(z * s_inv, secp256k1_n);
-    const v = @mod(sig.r * s_inv, secp256k1_n);
+
+    const u: NumberType = u_calc: { // u = z * s_inv (mod n)
+        var temp: MulExtendedNumberType = z;
+        temp = temp * s_inv;
+        temp = @mod(temp, secp256k1_n);
+        break :u_calc @intCast(temp);
+    };
+
+    const v: NumberType = v_calc: { // v = r * s_inv (mod n)
+        var temp: MulExtendedNumberType = sig.r;
+        temp = temp * s_inv;
+        temp = @mod(temp, secp256k1_n);
+        break :v_calc @intCast(temp);
+    };
+
     return G.muli(u).add(P.muli(v)).x.?.value == sig.r;
 }
 
 fn modpow(base: NumberType, exponent: NumberType, modulo: NumberType) NumberType {
     var base_mod = @mod(base, modulo);
-    var result: NumberType = 1;
+    var result: MulExtendedNumberType = 1;
     var exp = exponent;
     while (exp > 0) {
-        if (exp & 1 == 1) result = @mod((result * base_mod), modulo);
-        base_mod = @mod((base_mod * base_mod), modulo);
+        if (exp & 1 == 1) {
+            result = result * base_mod;
+            result = @mod(result, modulo);
+        }
+        var base_mod_temp: MulExtendedNumberType = base_mod;
+        base_mod_temp = base_mod_temp * base_mod_temp;
+        base_mod_temp = @mod(base_mod_temp, modulo);
+        base_mod = @mod(@as(NumberType, @intCast(base_mod_temp)), modulo);
         exp >>= 1;
     }
-    return result;
+    return @intCast(result);
 }
 
 // --------------- TESTS ---------------

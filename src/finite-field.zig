@@ -1,8 +1,9 @@
 const std = @import("std");
 const assert = std.debug.assert;
 
-pub const NumberType = u512;
-pub const HalfNumberType = u256;
+pub const NumberType = u256;
+pub const SumExtendedNumberType = u257;
+pub const MulExtendedNumberType = u512;
 pub const FieldElement = struct {
     value: NumberType,
     prime: NumberType,
@@ -25,7 +26,10 @@ pub const FieldElement = struct {
 
     pub fn add(self: Self, other: Self) Self {
         assert(self.prime == other.prime);
-        return Self.init(@mod((self.value + other.value), self.prime), self.prime);
+        var res: SumExtendedNumberType = self.value;
+        res = res + other.value;
+        res = @mod(res, self.prime);
+        return Self.init(@intCast(res), self.prime);
     }
 
     pub fn sub(self: Self, other: Self) Self {
@@ -33,16 +37,26 @@ pub const FieldElement = struct {
         if (self.value >= other.value) {
             return Self.init(@mod((self.value - other.value), self.prime), self.prime);
         } else {
-            return Self.init(@mod((self.prime + self.value - other.value), self.prime), self.prime);
+            var res: SumExtendedNumberType = self.value;
+            res = res + self.prime;
+            res = res - other.value;
+            res = @mod(res, self.prime);
+            return Self.init(@intCast(res), self.prime);
         }
     }
 
     pub fn mul(self: Self, other: Self) Self {
         assert(self.prime == other.prime);
-        return Self.init(@mod((self.value * other.value), self.prime), self.prime);
+        var res: MulExtendedNumberType = self.value;
+        res = res * other.value;
+        res = @mod(res, self.prime);
+        return Self.init(@intCast(res), self.prime);
     }
     pub fn muli(self: Self, otherRaw: NumberType) Self {
-        return Self.init(@mod((self.value * otherRaw), self.prime), self.prime);
+        var res: MulExtendedNumberType = self.value;
+        res = res * otherRaw;
+        res = @mod(res, self.prime);
+        return Self.init(@intCast(res), self.prime);
     }
 
     pub fn pow(self: Self, exponent: NumberType) Self {
@@ -140,4 +154,7 @@ test "inv" {
     try expect(b.inv().eq(FieldElement.init(245, 587)));
     const c = FieldElement.init(2358, 7919);
     try expect(c.inv().eq(FieldElement.init(6532, 7919)));
+    setGlobalPrime(0xffffffff_ffffffff_ffffffff_fffffffe_baaedce6_af48a03b_bfd25e8c_d0364141);
+    const d = fieldElementShortcut(1234567890);
+    try expect(d.inv().eq(fieldElementShortcut(0x6bd555ecd0e4e06df23bfbb091158daaa0c6ba7347f32b95f4484e8dceb39d91)));
 }

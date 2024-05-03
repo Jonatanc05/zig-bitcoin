@@ -5,6 +5,8 @@ const NumberType = FieldElementLib.NumberType;
 const MulExtendedNumberType = FieldElementLib.MulExtendedNumberType;
 const fe = FieldElementLib.fieldElementShortcut;
 const CurvePoint = @import("elliptic-curve.zig").CurvePoint;
+const native_endian = @import("builtin").target.cpu.arch.endian();
+
 const secp256k1_a = 0;
 const secp256k1_b = 7;
 const secp256k1_Gx = 0x79be667e_f9dcbbac_55a06295_ce870b07_029bfcdb_2dce28d9_59f2815b_16f81798;
@@ -29,7 +31,7 @@ pub fn hash(message: []const u8) NumberType {
     const bytesInNumberType: comptime_int = @divExact(@typeInfo(NumberType).Int.bits, 8);
     var z_bytes: [bytesInNumberType]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(message, z_bytes[0..bytesInNumberType], .{});
-    return std.mem.readInt(NumberType, &z_bytes, std.builtin.Endian.big);
+    return std.mem.readInt(NumberType, &z_bytes, native_endian);
 }
 
 pub fn generateKeyPair() struct { pubk: CurvePoint, prvk: NumberType } {

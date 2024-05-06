@@ -1,6 +1,7 @@
 const std = @import("std");
 const FieldElementLib = @import("finite-field.zig");
 const FieldElement = FieldElementLib.FieldElement;
+const NumberType = FieldElementLib.NumberType;
 const assert = std.debug.assert;
 
 pub const CurvePoint = struct {
@@ -8,7 +9,7 @@ pub const CurvePoint = struct {
     y: ?FieldElement,
     a: FieldElement,
     b: FieldElement,
-    order: ?FieldElementLib.NumberType = null,
+    order: ?NumberType = null,
 
     pub fn format(self: CurvePoint, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
         _ = fmt;
@@ -78,7 +79,7 @@ pub const CurvePoint = struct {
         return CurvePoint.init(x3, y3, self.a, self.b);
     }
 
-    pub fn muli(self: CurvePoint, scalar: FieldElementLib.NumberType) CurvePoint {
+    pub fn muli(self: CurvePoint, scalar: NumberType) CurvePoint {
         if (self.atInfinity()) return CurvePoint.init(null, null, self.a, self.b);
 
         var result = CurvePoint.init(null, null, self.a, self.b);
@@ -97,7 +98,7 @@ pub const CurvePoint = struct {
 
     pub fn computeOrder(self: *CurvePoint) void {
         var it = self.*;
-        var i: FieldElementLib.NumberType = 1;
+        var i: NumberType = 1;
         self.order = while (true) : (i += 1) {
             it = it.add(self.*);
             if (it.atInfinity()) break i + 1;

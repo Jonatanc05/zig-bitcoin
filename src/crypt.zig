@@ -93,10 +93,10 @@ fn bytesNeeded(comptime T: type, compressed: bool) comptime_int {
         return 2 * bytes_in_type + 1;
     }
 }
-pub fn serialize(point: CurvePoint, comptime compressed: bool, out: *[bytesNeeded(NumberType, compressed)]u8) void {
+pub fn serializePoint(point: CurvePoint, comptime compressed: bool, out: *[bytesNeeded(NumberType, compressed)]u8) void {
     assert(point.x != null and point.y != null); // @TODO infinity
     assert(point.x.?.prime == secp256k1_p);
-    const bytes_in_number_type = @divExact(@typeInfo(FieldElementLib.NumberType).Int.bits, 8);
+    const bytes_in_number_type = @divExact(@typeInfo(NumberType).Int.bits, 8);
     var x_bytes: [bytes_in_number_type]u8 = undefined;
     std.mem.writeInt(NumberType, &x_bytes, point.x.?.value, std.builtin.Endian.big);
 
@@ -144,6 +144,24 @@ pub fn parse(bytes: []const u8) CurvePoint {
     }
 }
 
+pub fn serializeSignature(sig: Signature, out: *[72]u8) void {
+    const bytes_0_to_5 = [_]u8{ 0x30, 0x46, 0x02, 0x21, 0x00 };
+    std.mem.copyForwards(u8, out[0..5], &bytes_0_to_5);
+    std.mem.writeInt(NumberType, out[5..37], sig.r, std.builtin.Endian.big);
+    const bytes_37_to_39 = [_]u8{ 0x02, 0x21 };
+    std.mem.copyForwards(u8, out[37..39], &bytes_37_to_39);
+    std.mem.writeInt(NumberType, out[39..71], sig.s, std.builtin.Endian.big);
+}
+
+pub fn parseSignature(bytes: []const u8) Signature {
+    assert(bytes.len == 72);
+    assert(bytes[0] == 0x30 and bytes[1] == 0x46);
+    return .{
+        .r = std.mem.readInt(NumberType, bytes[5..37], std.builtin.Endian.big),
+        .s = std.mem.readInt(NumberType, bytes[39..71], std.builtin.Endian.big),
+    };
+}
+
 fn modpow(base: NumberType, exponent: NumberType, modulo: NumberType) NumberType {
     var base_mod = @mod(base, modulo);
     var result: MulExtendedNumberType = 1;
@@ -182,12 +200,23 @@ test "sec serialization and parsing" {
     const p1 = G.muli(3858);
 
     var p1_uncompressed: [1 + 2 * @divExact(@typeInfo(NumberType).Int.bits, 8)]u8 = undefined;
-    serialize(p1, false, &p1_uncompressed);
+    serializePoint(p1, false, &p1_uncompressed);
     const p1_uncompressed_parsed = parse(p1_uncompressed[0..]);
     try expect(p1_uncompressed_parsed.eq(p1));
 
     var p1_compressed: [1 + @divExact(@typeInfo(NumberType).Int.bits, 8)]u8 = undefined;
-    serialize(p1, true, &p1_compressed);
+    serializePoint(p1, true, &p1_compressed);
     const p1_compressed_parsed = parse(p1_compressed[0..]);
     try expect(p1_compressed_parsed.eq(p1));
+}
+
+test "serialized signature" {
+    const sig: Signature = .{
+        .r = hash("idk"),
+        .s = hash("anything"),
+    };
+    var serialized_sig: [72]u8 = undefined;
+    serializeSignature(sig, &serialized_sig);
+    const sig_parsed = parseSignature(&serialized_sig);
+    try expect(sig_parsed.r == sig.r and sig_parsed.s == sig.s);
 }

@@ -71,25 +71,31 @@ pub fn main() !void {
         print("p1.y: 0x{x:0>64}\n", .{p1.y.?.value});
 
         var p1_uncompressed: [1 + 2 * @divExact(@typeInfo(NumberType).Int.bits, 8)]u8 = undefined;
-        CryptLib.serialize(p1, false, &p1_uncompressed);
+        CryptLib.serializePoint(p1, false, &p1_uncompressed);
         print("serialized(p1): 0x", .{});
         for (p1_uncompressed) |b| {
             print("{x:0>2}", .{b});
         }
         print("\n", .{});
 
-        const p1_uncompressed_parsed = CryptLib.parse(p1_uncompressed[0..]);
+        const p1_uncompressed_parsed = CryptLib.parsePoint(p1_uncompressed[0..]);
         print("parsed(serialized(p1)) == p1: {}\n", .{p1_uncompressed_parsed.eq(p1)});
 
         var p1_compressed: [1 + @divExact(@typeInfo(NumberType).Int.bits, 8)]u8 = undefined;
-        CryptLib.serialize(p1, true, &p1_compressed);
+        CryptLib.serializePoint(p1, true, &p1_compressed);
         print("compressed(p1): 0x", .{});
         for (p1_compressed) |b| {
             print("{x:0>2}", .{b});
         }
         print("\n", .{});
 
-        const p1_compressed_parsed = CryptLib.parse(p1_compressed[0..]);
+        const p1_compressed_parsed = CryptLib.parsePoint(p1_compressed[0..]);
         print("parsed(compressed(p1)) == p1: {}\n", .{p1_compressed_parsed.eq(p1)});
+
+        const u8_array = [8]u8{ 0x00, 0x00, 0x04, 0x09, 0x0a, 0x0f, 0x1a, 0xff };
+        print("\nu8_array: {any}\n", .{u8_array});
+        var encoded_u8_array: [10]u8 = undefined;
+        CryptLib.base58Encode(&u8_array, &encoded_u8_array);
+        print("base58Encode(u8_array): {s}\n", .{encoded_u8_array});
     }
 }

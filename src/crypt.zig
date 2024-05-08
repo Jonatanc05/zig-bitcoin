@@ -98,7 +98,7 @@ pub fn serializePoint(point: CurvePoint, comptime compressed: bool, out: *[bytes
     assert(point.x.?.prime == secp256k1_p);
     const bytes_in_number_type = @divExact(@typeInfo(NumberType).Int.bits, 8);
     var x_bytes: [bytes_in_number_type]u8 = undefined;
-    std.mem.writeInt(NumberType, &x_bytes, point.x.?.value, std.builtin.Endian.big);
+    std.mem.writeInt(NumberType, &x_bytes, point.x.?.value, .big);
 
     if (compressed) {
         assert(out.len >= bytes_in_number_type + 1);
@@ -110,18 +110,18 @@ pub fn serializePoint(point: CurvePoint, comptime compressed: bool, out: *[bytes
     } else {
         assert(out.len >= 2 * bytes_in_number_type + 1);
         var y_bytes: [bytes_in_number_type]u8 = undefined;
-        std.mem.writeInt(NumberType, &y_bytes, point.y.?.value, std.builtin.Endian.big);
+        std.mem.writeInt(NumberType, &y_bytes, point.y.?.value, .big);
         out.* = [1]u8{0x04} ++ x_bytes ++ y_bytes;
     }
 }
 
-pub fn parse(bytes: []const u8) CurvePoint {
+pub fn parsePoint(bytes: []const u8) CurvePoint {
     assert(bytes.len > 0);
     switch (bytes[0]) {
         0x02, 0x03 => {
             assert(bytes.len == 33);
             const x = FieldElement.init(
-                std.mem.readInt(NumberType, bytes[1..33], std.builtin.Endian.big),
+                std.mem.readInt(NumberType, bytes[1..33], .big),
                 secp256k1_p,
             );
             const y_squared = x.pow(3).add(secp256k1_b_fe);
@@ -136,8 +136,8 @@ pub fn parse(bytes: []const u8) CurvePoint {
         },
         0x04 => {
             assert(bytes.len == 65);
-            const x = FieldElement.init(std.mem.readInt(NumberType, bytes[1..33], std.builtin.Endian.big), secp256k1_p);
-            const y = FieldElement.init(std.mem.readInt(NumberType, bytes[33..65], std.builtin.Endian.big), secp256k1_p);
+            const x = FieldElement.init(std.mem.readInt(NumberType, bytes[1..33], .big), secp256k1_p);
+            const y = FieldElement.init(std.mem.readInt(NumberType, bytes[33..65], .big), secp256k1_p);
             return CurvePoint.init(x, y, secp256k1_a_fe, secp256k1_b_fe);
         },
         else => unreachable,
@@ -147,19 +147,42 @@ pub fn parse(bytes: []const u8) CurvePoint {
 pub fn serializeSignature(sig: Signature, out: *[72]u8) void {
     const bytes_0_to_5 = [_]u8{ 0x30, 0x46, 0x02, 0x21, 0x00 };
     std.mem.copyForwards(u8, out[0..5], &bytes_0_to_5);
-    std.mem.writeInt(NumberType, out[5..37], sig.r, std.builtin.Endian.big);
+    std.mem.writeInt(NumberType, out[5..37], sig.r, .big);
     const bytes_37_to_39 = [_]u8{ 0x02, 0x21 };
     std.mem.copyForwards(u8, out[37..39], &bytes_37_to_39);
-    std.mem.writeInt(NumberType, out[39..71], sig.s, std.builtin.Endian.big);
+    std.mem.writeInt(NumberType, out[39..71], sig.s, .big);
 }
 
 pub fn parseSignature(bytes: []const u8) Signature {
     assert(bytes.len == 72);
     assert(bytes[0] == 0x30 and bytes[1] == 0x46);
     return .{
-        .r = std.mem.readInt(NumberType, bytes[5..37], std.builtin.Endian.big),
-        .s = std.mem.readInt(NumberType, bytes[39..71], std.builtin.Endian.big),
+        .r = std.mem.readInt(NumberType, bytes[5..37], .big),
+        .s = std.mem.readInt(NumberType, bytes[39..71], .big),
     };
+}
+
+pub fn base58Encode(bytes: []const u8, out: []u8) void {
+    if (bytes.len > 128) @panic("base58Encode: bytes is too large, only up to 128 bytes supported");
+    const alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    var bytes_extended: [128]u8 = undefined;
+    if (bytes.len != 128)
+        bytes_extended = [_]u8{0} ** 128;
+    std.mem.copyForwards(u8, bytes_extended[(128 - bytes.len)..128], bytes);
+
+    const bytes_as_u1024: u1024 = std.mem.readInt(u1024, &bytes_extended, .big);
+    var remaining = bytes_as_u1024;
+    var i = out.len;
+    while (remaining > 0) {
+        if (i == 0) std.debug.panic("base58Encode: out is too small ({d} bytes) for the input 0x{x}", .{ out.len, bytes_as_u1024 });
+        i = i - 1;
+        out[i] = alphabet[@intCast(remaining % 58)];
+        remaining = remaining / 58;
+    }
+    while (i > 0) {
+        i = i - 1;
+        out[i] = alphabet[0];
+    }
 }
 
 fn modpow(base: NumberType, exponent: NumberType, modulo: NumberType) NumberType {
@@ -201,12 +224,12 @@ test "sec serialization and parsing" {
 
     var p1_uncompressed: [1 + 2 * @divExact(@typeInfo(NumberType).Int.bits, 8)]u8 = undefined;
     serializePoint(p1, false, &p1_uncompressed);
-    const p1_uncompressed_parsed = parse(p1_uncompressed[0..]);
+    const p1_uncompressed_parsed = parsePoint(p1_uncompressed[0..]);
     try expect(p1_uncompressed_parsed.eq(p1));
 
     var p1_compressed: [1 + @divExact(@typeInfo(NumberType).Int.bits, 8)]u8 = undefined;
     serializePoint(p1, true, &p1_compressed);
-    const p1_compressed_parsed = parse(p1_compressed[0..]);
+    const p1_compressed_parsed = parsePoint(p1_compressed[0..]);
     try expect(p1_compressed_parsed.eq(p1));
 }
 
@@ -219,4 +242,11 @@ test "serialized signature" {
     serializeSignature(sig, &serialized_sig);
     const sig_parsed = parseSignature(&serialized_sig);
     try expect(sig_parsed.r == sig.r and sig_parsed.s == sig.s);
+}
+
+test "base58 encoding" {
+    const u8_array = [8]u8{ 0x00, 0x00, 0x04, 0x09, 0x0a, 0x0f, 0x1a, 0xff };
+    var encoded_u8_array: [10]u8 = undefined;
+    base58Encode(&u8_array, &encoded_u8_array);
+    try expect(std.mem.eql(u8, &encoded_u8_array, "1131Yr1PVY"));
 }

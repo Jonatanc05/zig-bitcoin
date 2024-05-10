@@ -1,4 +1,8 @@
+const c_ripemd = @cImport({
+    @cInclude("ripemd.c");
+});
 const std = @import("std");
+const Sha256 = std.crypto.hash.sha2.Sha256;
 const FieldElementLib = @import("finite-field.zig");
 const FieldElement = FieldElementLib.FieldElement;
 const NumberType = FieldElementLib.NumberType;
@@ -38,7 +42,7 @@ pub const Signature = struct {
 pub fn hash(message: []const u8) NumberType {
     const bytesInNumberType = @divExact(@typeInfo(NumberType).Int.bits, 8);
     var z_bytes: [bytesInNumberType]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(message, z_bytes[0..bytesInNumberType], .{});
+    Sha256.hash(message, z_bytes[0..bytesInNumberType], .{});
     return std.mem.readInt(NumberType, &z_bytes, native_endian);
 }
 
@@ -162,7 +166,7 @@ pub fn parseSignature(bytes: []const u8) Signature {
     };
 }
 
-pub fn base58Encode(bytes: []const u8, out: []u8) void {
+pub fn base58Encode(bytes: []const u8, out: []u8) usize {
     if (bytes.len > 128) @panic("base58Encode: bytes is too large, only up to 128 bytes supported");
     const alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
     var bytes_extended: [128]u8 = undefined;
@@ -174,15 +178,33 @@ pub fn base58Encode(bytes: []const u8, out: []u8) void {
     var remaining = bytes_as_u1024;
     var i = out.len;
     while (remaining > 0) {
-        if (i == 0) std.debug.panic("base58Encode: out is too small ({d} bytes) for the input 0x{x}", .{ out.len, bytes_as_u1024 });
+        if (i == 0) std.debug.panic("base58Encode: out is too small ({d} bytes) for the input {x}", .{ out.len, bytes_as_u1024 });
         i = i - 1;
         out[i] = alphabet[@intCast(remaining % 58)];
         remaining = remaining / 58;
     }
-    while (i > 0) {
-        i = i - 1;
-        out[i] = alphabet[0];
-    }
+    i = i - 1;
+    out[i] = alphabet[0];
+    return i;
+}
+
+pub fn btcAddress(pubkey: CurvePoint, out: *const []u8, testnet: bool) usize {
+    var serializedPoint: [33]u8 = undefined;
+    serializePoint(pubkey, true, &serializedPoint);
+    var sha256_1: [33]u8 = undefined;
+    sha256_1[32] = 0x00;
+    Sha256.hash(&serializedPoint, sha256_1[0..32], .{});
+    var hash160: [21]u8 = undefined;
+    c_ripemd.calc_hash(&sha256_1, hash160[1..]);
+    hash160[0] = if (testnet) 0x6f else 0x00;
+    var sha256_2: [32]u8 = undefined;
+    Sha256.hash(&hash160, &sha256_2, .{});
+    var sha256_3: [32]u8 = undefined;
+    Sha256.hash(&sha256_2, &sha256_3, .{});
+    var checksum: [4]u8 = undefined;
+    std.mem.copyForwards(u8, &checksum, sha256_3[0..4]);
+    const address = hash160 ++ checksum;
+    return base58Encode(&address, out.*);
 }
 
 fn modpow(base: NumberType, exponent: NumberType, modulo: NumberType) NumberType {
@@ -247,6 +269,14 @@ test "serialized signature" {
 test "base58 encoding" {
     const u8_array = [8]u8{ 0x00, 0x00, 0x04, 0x09, 0x0a, 0x0f, 0x1a, 0xff };
     var encoded_u8_array: [10]u8 = undefined;
-    base58Encode(&u8_array, &encoded_u8_array);
-    try expect(std.mem.eql(u8, &encoded_u8_array, "1131Yr1PVY"));
+    const start = base58Encode(&u8_array, &encoded_u8_array);
+    try expect(std.mem.eql(u8, encoded_u8_array[start..], "131Yr1PVY"));
+}
+
+test "btc address" {
+    const prvk = 0x5da1cb5b4282e3f5c2314df81a3711fa7f0217401de5f72da0ab4906fab04f4c;
+    const pubk = G.muli(prvk);
+    var out: [40]u8 = undefined;
+    const start = btcAddress(pubk, &out[0..], false);
+    try expect(std.mem.eql(u8, out[start..], "1GHqmiofmT3PgrZDf7fcq632xybfg6onG4"));
 }

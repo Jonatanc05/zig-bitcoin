@@ -21,6 +21,9 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    exe.addIncludePath(.{
+        .path = "include",
+    });
 
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default
@@ -68,11 +71,13 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     }));
 
-    const run_crypt_unit_tests = b.addRunArtifact(b.addTest(.{
+    const build_crypt_unit_tests = b.addTest(.{
         .root_source_file = .{ .path = "src/crypt.zig" },
         .target = target,
         .optimize = optimize,
-    }));
+    });
+    build_crypt_unit_tests.root_module.addIncludePath(.{ .path = ("include") });
+    const run_crypt_unit_tests = b.addRunArtifact(build_crypt_unit_tests);
 
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_exe_unit_tests.step);

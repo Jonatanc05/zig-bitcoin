@@ -95,7 +95,22 @@ pub fn main() !void {
         const u8_array = [8]u8{ 0x00, 0x00, 0x04, 0x09, 0x0a, 0x0f, 0x1a, 0xff };
         print("\nu8_array: {any}\n", .{u8_array});
         var encoded_u8_array: [10]u8 = undefined;
-        CryptLib.base58Encode(&u8_array, &encoded_u8_array);
-        print("base58Encode(u8_array): {s}\n", .{encoded_u8_array});
+        const start = CryptLib.base58Encode(&u8_array, &encoded_u8_array);
+        print("base58Encode(u8_array): {s}\n\n", .{encoded_u8_array[start..]});
+    }
+
+    print("------------ Generating BTC Address ------------\n", .{});
+    {
+        const testnet = false;
+        print("testnet: {}\n", .{testnet});
+        const prvk = 0x5da1cb5b4282e3f5c2314df81a3711fa7f0217401de5f72da0ab4906fab04f4c;
+        print("prvkey: {x}\n", .{prvk});
+        const pubk = CryptLib.G.muli(prvk);
+        var serialized_pubk: [33]u8 = undefined;
+        CryptLib.serializePoint(pubk, true, &serialized_pubk);
+        print("pubkey (SEC compressed): {x}\n", .{serialized_pubk});
+        var address: [40]u8 = undefined;
+        const start = CryptLib.btcAddress(pubk, &address[0..], testnet);
+        print("address: {s}\n", .{address[start..]});
     }
 }

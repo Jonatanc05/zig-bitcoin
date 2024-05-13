@@ -59,12 +59,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     }));
 
-    const run_finite_field_unit_tests = b.addRunArtifact(b.addTest(.{
-        .root_source_file = .{ .path = "src/finite-field.zig" },
-        .target = target,
-        .optimize = optimize,
-    }));
-
     const run_elliptic_curve_unit_tests = b.addRunArtifact(b.addTest(.{
         .root_source_file = .{ .path = "src/elliptic-curve.zig" },
         .target = target,
@@ -81,7 +75,6 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_exe_unit_tests.step);
-    test_step.dependOn(&run_finite_field_unit_tests.step);
     test_step.dependOn(&run_elliptic_curve_unit_tests.step);
     test_step.dependOn(&run_crypt_unit_tests.step);
 }

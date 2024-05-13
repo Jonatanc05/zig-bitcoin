@@ -2,15 +2,17 @@ const c_ripemd = @cImport({
     @cInclude("ripemd.c");
 });
 const std = @import("std");
-const Sha256 = std.crypto.hash.sha2.Sha256;
-const FieldElementLib = @import("finite-field.zig");
-const FieldElement = FieldElementLib.FieldElement;
-const NumberType = FieldElementLib.NumberType;
-const MulExtendedNumberType = FieldElementLib.MulExtendedNumberType;
-const fe = FieldElementLib.fieldElementShortcut;
-const CurvePoint = @import("elliptic-curve.zig").CurvePoint;
 const assert = std.debug.assert;
 const native_endian = @import("builtin").target.cpu.arch.endian();
+var allocator = std.heap.page_allocator;
+const Sha256 = std.crypto.hash.sha2.Sha256;
+
+const EllipticCurveLib = @import("elliptic-curve.zig");
+const FieldElement = EllipticCurveLib.FieldElement;
+const NumberType = EllipticCurveLib.NumberType;
+const MulExtendedNumberType = EllipticCurveLib.MulExtendedNumberType;
+const fe = EllipticCurveLib.fieldElementShortcut;
+const CurvePoint = EllipticCurveLib.CurvePoint;
 
 comptime {
     if (NumberType != u256) {
@@ -18,6 +20,26 @@ comptime {
         @compileError("Only NumberType = u256 is supported");
     }
 }
+
+fn modpow(base: NumberType, exponent: NumberType, modulo: NumberType) NumberType {
+    var base_mod = @mod(base, modulo);
+    var result: MulExtendedNumberType = 1;
+    var exp = exponent;
+    while (exp > 0) {
+        if (exp & 1 == 1) {
+            result = result * base_mod;
+            result = @mod(result, modulo);
+        }
+        var base_mod_temp: MulExtendedNumberType = base_mod;
+        base_mod_temp = base_mod_temp * base_mod_temp;
+        base_mod_temp = @mod(base_mod_temp, modulo);
+        base_mod = @mod(@as(NumberType, @intCast(base_mod_temp)), modulo);
+        exp >>= 1;
+    }
+    return @intCast(result);
+}
+
+//#region CRYPTOGRAPHY #########################################################################
 
 const secp256k1_a = 0;
 const secp256k1_b = 7;
@@ -88,6 +110,10 @@ pub fn verify(z: NumberType, P: CurvePoint, sig: Signature) bool {
 
     return G.muli(u).add(P.muli(v)).x.?.value == sig.r;
 }
+
+//#endregion
+
+//#region SERIALIZATION #########################################################################
 
 fn bytesNeeded(comptime T: type, compressed: bool) comptime_int {
     const bytes_in_type = @divExact(@typeInfo(T).Int.bits, 8);
@@ -188,6 +214,102 @@ pub fn base58Encode(bytes: []const u8, out: []u8) usize {
     return i;
 }
 
+//#endregion
+
+//#region BITCOIN #########################################################################
+
+//#region TRANSACTIONS ######################################################################
+
+pub const TxOutput = struct {
+    amount: u64,
+    script_pubkey: []u8,
+};
+pub const TxInput = struct {
+    txid: u256,
+    index: u32,
+    script_sig: []u8,
+    sequence: u64,
+};
+pub const Tx = struct {
+    version: u32,
+    inputs: []TxInput,
+    outputs: []TxOutput,
+    locktime: u8,
+};
+
+// For little endian reading
+const Cursor = struct {
+    data: []u8,
+    index: usize = 0,
+
+    fn readInt(self: *Cursor, comptime T: type) T {
+        comptime assert(@typeInfo(T).Int.signedness == .unsigned);
+        const n_bytes = @divExact(@typeInfo(T).Int.bits, 8);
+        const ret = std.mem.readInt(T, self.data[self.index..][0..n_bytes], .little);
+        self.index += @sizeOf(T);
+        return ret;
+    }
+
+    // zig fmt: off
+    fn readVarint(self: *Cursor) u32 {
+        return switch (self.data[self.index]) {
+            else => @intCast(self.readInt(u8)),
+            0xfd => { self.index += 1; return @intCast(self.readInt(u16)); },
+            0xfe => { self.index += 1; return @intCast(self.readInt(u24)); },
+            0xff => { self.index += 1; return @intCast(self.readInt(u32)); },
+        };
+    }
+    // zig fmt: on
+
+    fn readBytes(self: *Cursor, dest: []u8) void {
+        std.mem.copyBackwards(u8, dest, self.data[self.index..][0..dest.len]);
+        self.index += dest.len;
+    }
+};
+
+pub fn parseTx(data: []u8) !Tx {
+    var cursor: Cursor = .{ .data = data };
+    var tx: Tx = undefined;
+
+    tx.version = cursor.readInt(u32);
+
+    tx.inputs = inputs: {
+        const n_inputs = cursor.readVarint();
+        const inputs = try allocator.alloc(TxInput, n_inputs);
+        for (inputs) |*input| {
+            input.txid = cursor.readInt(u256);
+            input.index = cursor.readInt(u32);
+            input.script_sig = script_sig: {
+                const script_sig = try allocator.alloc(u8, cursor.readVarint());
+                cursor.readBytes(script_sig);
+                break :script_sig script_sig;
+            };
+            input.sequence = cursor.readInt(u32);
+        }
+        break :inputs inputs;
+    };
+
+    tx.outputs = outputs: {
+        const n_outputs = cursor.readVarint();
+        const outputs = try allocator.alloc(TxOutput, n_outputs);
+        for (outputs) |*output| {
+            output.amount = cursor.readInt(u64);
+            output.script_pubkey = script_pubkey: {
+                const script_pubkey = try allocator.alloc(u8, cursor.readVarint());
+                cursor.readBytes(script_pubkey);
+                break :script_pubkey script_pubkey;
+            };
+        }
+        break :outputs outputs;
+    };
+
+    tx.locktime = cursor.readInt(u8);
+
+    return tx;
+}
+
+//#endregion
+
 pub fn btcAddress(pubkey: CurvePoint, out: *const []u8, testnet: bool) usize {
     var serializedPoint: [33]u8 = undefined;
     serializePoint(pubkey, true, &serializedPoint);
@@ -207,25 +329,9 @@ pub fn btcAddress(pubkey: CurvePoint, out: *const []u8, testnet: bool) usize {
     return base58Encode(&address, out.*);
 }
 
-fn modpow(base: NumberType, exponent: NumberType, modulo: NumberType) NumberType {
-    var base_mod = @mod(base, modulo);
-    var result: MulExtendedNumberType = 1;
-    var exp = exponent;
-    while (exp > 0) {
-        if (exp & 1 == 1) {
-            result = result * base_mod;
-            result = @mod(result, modulo);
-        }
-        var base_mod_temp: MulExtendedNumberType = base_mod;
-        base_mod_temp = base_mod_temp * base_mod_temp;
-        base_mod_temp = @mod(base_mod_temp, modulo);
-        base_mod = @mod(@as(NumberType, @intCast(base_mod_temp)), modulo);
-        exp >>= 1;
-    }
-    return @intCast(result);
-}
+//#endregion
 
-// --------------- TESTS ---------------
+//#region TESTS #########################################################################
 
 const expect = std.testing.expect;
 
@@ -280,3 +386,27 @@ test "btc address" {
     const start = btcAddress(pubk, &out[0..], false);
     try expect(std.mem.eql(u8, out[start..], "1GHqmiofmT3PgrZDf7fcq632xybfg6onG4"));
 }
+
+test "parse transaction" {
+    // zig fmt: off
+    var transaction_bytes = [_]u8{
+        0x01, 0x00, 0x00, 0x00, // version (constant)
+        0x01, // number of inputs
+            // 32 bytes of TXID
+            0x7b, 0x1e, 0xab, 0xe0, 0x20, 0x9b, 0x1f, 0xe7, 0x94, 0x12, 0x45, 0x75, 0xef, 0x80, 0x70, 0x57, 0xc7, 0x7a, 0xda, 0x21, 0x38, 0xae, 0x4f, 0xa8, 0xd6, 0xc4, 0xde, 0x03, 0x98, 0xa1, 0x4f, 0x3f,
+            0x00, 0x00, 0x00, 0x00, // output index
+            0x49, // bytes of script signature
+                0x48, 0x30, 0x45, 0x02, 0x21, 0x00, 0x89, 0x49, 0xf0, 0xcb, 0x40, 0x00, 0x94, 0xad, 0x2b, 0x5e, 0xb3, 0x99, 0xd5, 0x9d, 0x01, 0xc1, 0x4d, 0x73, 0xd8, 0xfe, 0x6e, 0x96, 0xdf, 0x1a, 0x71, 0x50, 0xde, 0xb3, 0x88, 0xab, 0x89, 0x35, 0x02, 0x20, 0x79, 0x65, 0x60, 0x90, 0xd7, 0xf6, 0xba, 0xc4, 0xc9, 0xa9, 0x4e, 0x0a, 0xad, 0x31, 0x1a, 0x42, 0x68, 0xe0, 0x82, 0xa7, 0x25, 0xf8, 0xae, 0xae, 0x05, 0x73, 0xfb, 0x12, 0xff, 0x86, 0x6a, 0x5f, 0x01,
+            0xff, 0xff, 0xff, 0xff, // sequence
+        0x01, // number of outputs
+            0xf0, 0xca, 0x05, 0x2a, 0x01, 0x00, 0x00, 0x00, // amount
+            0x19, // bytes of script pubkey
+                0x76, 0xa9, 0x14, 0xcb, 0xc2, 0x0a, 0x76, 0x64, 0xf2, 0xf6, 0x9e, 0x53, 0x55, 0xaa, 0x42, 0x70, 0x45, 0xbc, 0x15, 0xe7, 0xc6, 0xc7, 0x72, 0x88, 0xac,
+        0x00, 0x00, 0x00, 0x00 // locktime
+    };
+    // zig fmt: on
+    const transaction = try parseTx(transaction_bytes[0..transaction_bytes.len]);
+    _ = transaction;
+}
+
+//#endregion

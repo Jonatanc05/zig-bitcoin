@@ -1,16 +1,18 @@
 const std = @import("std");
-const FieldElementLib = @import("finite-field.zig");
-const FieldElement = FieldElementLib.FieldElement;
-const NumberType = FieldElementLib.NumberType;
-const fe = FieldElementLib.fieldElementShortcut;
-const CurvePoint = @import("elliptic-curve.zig").CurvePoint;
-const CryptLib = @import("crypt.zig");
 const print = std.debug.print;
+
+const EllipticCurveLib = @import("elliptic-curve.zig");
+const FieldElement = EllipticCurveLib.FieldElement;
+const NumberType = EllipticCurveLib.NumberType;
+const fe = EllipticCurveLib.fieldElementShortcut;
+const CurvePoint = EllipticCurveLib.CurvePoint;
+
+const CryptLib = @import("crypt.zig");
 
 pub fn main() !void {
     print("\n------------- FiniteFields -------------\n", .{});
     {
-        FieldElementLib.setGlobalPrime(13);
+        EllipticCurveLib.setGlobalPrime(13);
         const a = fe(10);
         const b = fe(5);
         print("Element a: {}\n", .{a});
@@ -27,7 +29,7 @@ pub fn main() !void {
 
     print("------------- EllipticCurves -------------\n", .{});
     {
-        FieldElementLib.setGlobalPrime(223);
+        EllipticCurveLib.setGlobalPrime(223);
         const a = fe(0);
         const b = fe(7);
         const p1 = CurvePoint.init(fe(192), fe(105), a, b);
@@ -103,7 +105,7 @@ pub fn main() !void {
     {
         const testnet = false;
         print("testnet: {}\n", .{testnet});
-        const prvk = 0x5da1cb5b4282e3f5c2314df81a3711fa7f0217401de5f72da0ab4906fab04f4c;
+        const prvk = 0xF45E6907B16670196E487CF667E9FA510F0593276335DA22311EB67C90D46421;
         print("prvkey: {x}\n", .{prvk});
         const pubk = CryptLib.G.muli(prvk);
         var serialized_pubk: [33]u8 = undefined;
@@ -112,5 +114,28 @@ pub fn main() !void {
         var address: [40]u8 = undefined;
         const start = CryptLib.btcAddress(pubk, &address[0..], testnet);
         print("address: {s}\n", .{address[start..]});
+    }
+
+    print("\n------------------- Transactions -------------------\n", .{});
+    {
+        // zig fmt: off
+        var transaction_bytes = [_]u8{
+            0x01, 0x00, 0x00, 0x00, // version (constant)
+            0x01, // number of inputs
+                // 32 bytes of TXID
+                0x7b, 0x1e, 0xab, 0xe0, 0x20, 0x9b, 0x1f, 0xe7, 0x94, 0x12, 0x45, 0x75, 0xef, 0x80, 0x70, 0x57, 0xc7, 0x7a, 0xda, 0x21, 0x38, 0xae, 0x4f, 0xa8, 0xd6, 0xc4, 0xde, 0x03, 0x98, 0xa1, 0x4f, 0x3f,
+                0x00, 0x00, 0x00, 0x00, // output index
+                0x49, // bytes of script signature
+                    0x48, 0x30, 0x45, 0x02, 0x21, 0x00, 0x89, 0x49, 0xf0, 0xcb, 0x40, 0x00, 0x94, 0xad, 0x2b, 0x5e, 0xb3, 0x99, 0xd5, 0x9d, 0x01, 0xc1, 0x4d, 0x73, 0xd8, 0xfe, 0x6e, 0x96, 0xdf, 0x1a, 0x71, 0x50, 0xde, 0xb3, 0x88, 0xab, 0x89, 0x35, 0x02, 0x20, 0x79, 0x65, 0x60, 0x90, 0xd7, 0xf6, 0xba, 0xc4, 0xc9, 0xa9, 0x4e, 0x0a, 0xad, 0x31, 0x1a, 0x42, 0x68, 0xe0, 0x82, 0xa7, 0x25, 0xf8, 0xae, 0xae, 0x05, 0x73, 0xfb, 0x12, 0xff, 0x86, 0x6a, 0x5f, 0x01,
+                0xff, 0xff, 0xff, 0xff, // sequence
+            0x01, // number of outputs
+                0xf0, 0xca, 0x05, 0x2a, 0x01, 0x00, 0x00, 0x00, // amount
+                0x19, // bytes of script pubkey
+                    0x76, 0xa9, 0x14, 0xcb, 0xc2, 0x0a, 0x76, 0x64, 0xf2, 0xf6, 0x9e, 0x53, 0x55, 0xaa, 0x42, 0x70, 0x45, 0xbc, 0x15, 0xe7, 0xc6, 0xc7, 0x72, 0x88, 0xac,
+            0x00, 0x00, 0x00, 0x00 // locktime
+        };
+        // zig fmt: on
+        const transaction = try CryptLib.parseTx(transaction_bytes[0..transaction_bytes.len]);
+        print("transaction: {any}\n", .{transaction});
     }
 }

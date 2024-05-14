@@ -218,7 +218,24 @@ pub fn base58Encode(bytes: []const u8, out: []u8) usize {
 
 //#region BITCOIN #########################################################################
 
-//#region TRANSACTIONS ######################################################################
+pub fn btcAddress(pubkey: CurvePoint, out: *const []u8, testnet: bool) usize {
+    var serializedPoint: [33]u8 = undefined;
+    serializePoint(pubkey, true, &serializedPoint);
+    var sha256_1: [33]u8 = undefined;
+    sha256_1[32] = 0x00;
+    Sha256.hash(&serializedPoint, sha256_1[0..32], .{});
+    var hash160: [21]u8 = undefined;
+    c_ripemd.calc_hash(&sha256_1, hash160[1..]);
+    hash160[0] = if (testnet) 0x6f else 0x00;
+    var sha256_2: [32]u8 = undefined;
+    Sha256.hash(&hash160, &sha256_2, .{});
+    var sha256_3: [32]u8 = undefined;
+    Sha256.hash(&sha256_2, &sha256_3, .{});
+    var checksum: [4]u8 = undefined;
+    std.mem.copyForwards(u8, &checksum, sha256_3[0..4]);
+    const address = hash160 ++ checksum;
+    return base58Encode(&address, out.*);
+}
 
 pub const TxOutput = struct {
     amount: u64,
@@ -234,7 +251,7 @@ pub const Tx = struct {
     version: u32,
     inputs: []TxInput,
     outputs: []TxOutput,
-    locktime: u8,
+    locktime: u32,
 };
 
 // For little endian reading
@@ -306,27 +323,6 @@ pub fn parseTx(data: []u8) !Tx {
     tx.locktime = cursor.readInt(u8);
 
     return tx;
-}
-
-//#endregion
-
-pub fn btcAddress(pubkey: CurvePoint, out: *const []u8, testnet: bool) usize {
-    var serializedPoint: [33]u8 = undefined;
-    serializePoint(pubkey, true, &serializedPoint);
-    var sha256_1: [33]u8 = undefined;
-    sha256_1[32] = 0x00;
-    Sha256.hash(&serializedPoint, sha256_1[0..32], .{});
-    var hash160: [21]u8 = undefined;
-    c_ripemd.calc_hash(&sha256_1, hash160[1..]);
-    hash160[0] = if (testnet) 0x6f else 0x00;
-    var sha256_2: [32]u8 = undefined;
-    Sha256.hash(&hash160, &sha256_2, .{});
-    var sha256_3: [32]u8 = undefined;
-    Sha256.hash(&sha256_2, &sha256_3, .{});
-    var checksum: [4]u8 = undefined;
-    std.mem.copyForwards(u8, &checksum, sha256_3[0..4]);
-    const address = hash160 ++ checksum;
-    return base58Encode(&address, out.*);
 }
 
 //#endregion

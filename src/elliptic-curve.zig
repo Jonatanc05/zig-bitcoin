@@ -2,11 +2,30 @@ const std = @import("std");
 const assert = std.debug.assert;
 const expect = @import("std").testing.expect;
 
-//#region FINITE_FIELD #########################################################################
-
 pub const NumberType = u256;
 pub const SumExtendedNumberType = u257;
 pub const MulExtendedNumberType = u512;
+
+pub fn modpow(base: NumberType, exponent: NumberType, modulo: NumberType) NumberType {
+    var base_mod = @mod(base, modulo);
+    var result: MulExtendedNumberType = 1;
+    var exp = exponent;
+    while (exp > 0) {
+        if (exp & 1 == 1) {
+            result = result * base_mod;
+            result = @mod(result, modulo);
+        }
+        var base_mod_temp: MulExtendedNumberType = base_mod;
+        base_mod_temp = base_mod_temp * base_mod_temp;
+        base_mod_temp = @mod(base_mod_temp, modulo);
+        base_mod = @mod(@as(NumberType, @intCast(base_mod_temp)), modulo);
+        exp >>= 1;
+    }
+    return @intCast(result);
+}
+
+//#region FINITE_FIELD #########################################################################
+
 pub const FieldElement = struct {
     value: NumberType,
     prime: NumberType,

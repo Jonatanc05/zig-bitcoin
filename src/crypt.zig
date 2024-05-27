@@ -7,36 +7,66 @@ var allocator = std.heap.page_allocator;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
 const EllipticCurveLib = @import("elliptic-curve.zig");
+const modpow = EllipticCurveLib.modpow;
 const FieldElement = EllipticCurveLib.FieldElement;
-const NumberType = EllipticCurveLib.NumberType;
-const MulExtendedNumberType = EllipticCurveLib.MulExtendedNumberType;
-const fe = EllipticCurveLib.fieldElementShortcut;
 const CurvePoint = EllipticCurveLib.CurvePoint;
 
 comptime {
-    if (NumberType != u256) {
+    if (EllipticCurveLib.NumberType != u256 or EllipticCurveLib.MulExtendedNumberType != u512) {
         // This is because we use secp256k1
         @compileError("Only NumberType = u256 is supported");
     }
 }
 
-fn modpow(base: NumberType, exponent: NumberType, modulo: NumberType) NumberType {
-    var base_mod = @mod(base, modulo);
-    var result: MulExtendedNumberType = 1;
-    var exp = exponent;
-    while (exp > 0) {
-        if (exp & 1 == 1) {
-            result = result * base_mod;
-            result = @mod(result, modulo);
-        }
-        var base_mod_temp: MulExtendedNumberType = base_mod;
-        base_mod_temp = base_mod_temp * base_mod_temp;
-        base_mod_temp = @mod(base_mod_temp, modulo);
-        base_mod = @mod(@as(NumberType, @intCast(base_mod_temp)), modulo);
-        exp >>= 1;
+const Cursor = struct {
+    data: []const u8,
+    index: usize = 0,
+
+    fn init(data: []const u8) Cursor {
+        return Cursor{ .data = data };
     }
-    return @intCast(result);
-}
+
+    fn ended(self: *Cursor) bool {
+        return self.index == self.data.len;
+    }
+
+    fn assertCanRead(self: *Cursor, n_bytes: usize) void {
+        if (self.index + n_bytes > self.data.len) {
+            const message = std.fmt.allocPrint(
+                allocator,
+                "Trying to read {} bytes at index {} when the data is only {} bytes (only {} could be read)",
+                .{ n_bytes, self.index, self.data.len, self.data.len - self.index },
+            ) catch unreachable;
+            @panic(message);
+        }
+    }
+
+    // Little endian
+    fn readInt(self: *Cursor, comptime T: type) T {
+        comptime assert(@typeInfo(T).Int.signedness == .unsigned);
+        self.assertCanRead(@sizeOf(T));
+        const n_bytes = @divExact(@typeInfo(T).Int.bits, 8);
+        const ret = std.mem.readInt(T, self.data[self.index..][0..n_bytes], .little);
+        self.index += @sizeOf(T);
+        return ret;
+    }
+
+    fn readVarint(self: *Cursor) u32 {
+        const first_byte = self.readInt(u8);
+        return switch (first_byte) {
+            else => @intCast(first_byte),
+            0xfd => return @intCast(self.readInt(u16)),
+            0xfe => return @intCast(self.readInt(u24)),
+            0xff => return @intCast(self.readInt(u32)),
+        };
+    }
+
+    fn readBytes(self: *Cursor, dest: []u8) void {
+        self.assertCanRead(dest.len);
+        std.mem.copyForwards(u8, dest, self.data[self.index..][0..dest.len]);
+        self.index += dest.len;
+    }
+};
 
 //#region CRYPTOGRAPHY #########################################################################
 
@@ -56,29 +86,28 @@ pub const secp256k1_p = 0xffffffff_ffffffff_ffffffff_ffffffff_ffffffff_ffffffff_
 pub const secp256k1_n = 0xffffffff_ffffffff_ffffffff_fffffffe_baaedce6_af48a03b_bfd25e8c_d0364141;
 
 pub const Signature = struct {
-    r: NumberType,
-    s: NumberType,
+    r: u256,
+    s: u256,
 };
 
-pub fn hash(message: []const u8) NumberType {
-    const bytesInNumberType = @divExact(@typeInfo(NumberType).Int.bits, 8);
-    var z_bytes: [bytesInNumberType]u8 = undefined;
-    Sha256.hash(message, z_bytes[0..bytesInNumberType], .{});
-    return std.mem.readInt(NumberType, &z_bytes, .big);
+pub fn hashAsU256(message: []const u8) u256 {
+    var z_bytes: [32]u8 = undefined;
+    Sha256.hash(message, &z_bytes, .{});
+    return std.mem.readInt(u256, &z_bytes, .big);
 }
 
-pub fn generateKeyPair() struct { pubk: CurvePoint, prvk: NumberType } {
-    const e = std.crypto.random.int(NumberType);
+pub fn generateKeyPair() struct { pubk: CurvePoint, prvk: u256 } {
+    const e = std.crypto.random.int(u256);
     const P = G.muli(e);
     return .{ .pubk = P, .prvk = e };
 }
 
-pub fn sign(z: NumberType, e: NumberType) Signature {
-    const k = std.crypto.random.int(NumberType);
+pub fn sign(z: u256, e: u256) Signature {
+    const k = std.crypto.random.int(u256);
     const r = G.muli(k).x.?.value;
     const k_inv = modpow(k, secp256k1_n - 2, secp256k1_n);
-    const s: NumberType = s_calc: { // s = (r * e + z) * k_inv (mod n)
-        var temp: MulExtendedNumberType = r;
+    const s: u256 = s_calc: { // s = (r * e + z) * k_inv (mod n)
+        var temp: u512 = r;
         temp = temp * e;
         temp = @mod(temp, secp256k1_n);
         temp = temp + z;
@@ -90,18 +119,18 @@ pub fn sign(z: NumberType, e: NumberType) Signature {
     return Signature{ .r = r, .s = s };
 }
 
-pub fn verify(z: NumberType, P: CurvePoint, sig: Signature) bool {
+pub fn verify(z: u256, P: CurvePoint, sig: Signature) bool {
     const s_inv = modpow(sig.s, secp256k1_n - 2, secp256k1_n);
 
-    const u: NumberType = u_calc: { // u = z * s_inv (mod n)
-        var temp: MulExtendedNumberType = z;
+    const u: u256 = u_calc: { // u = z * s_inv (mod n)
+        var temp: u512 = z;
         temp = temp * s_inv;
         temp = @mod(temp, secp256k1_n);
         break :u_calc @intCast(temp);
     };
 
-    const v: NumberType = v_calc: { // v = r * s_inv (mod n)
-        var temp: MulExtendedNumberType = sig.r;
+    const v: u256 = v_calc: { // v = r * s_inv (mod n)
+        var temp: u512 = sig.r;
         temp = temp * s_inv;
         temp = @mod(temp, secp256k1_n);
         break :v_calc @intCast(temp);
@@ -114,32 +143,23 @@ pub fn verify(z: NumberType, P: CurvePoint, sig: Signature) bool {
 
 //#region SERIALIZATION #########################################################################
 
-fn bytesNeeded(comptime T: type, compressed: bool) comptime_int {
-    const bytes_in_type = @divExact(@typeInfo(T).Int.bits, 8);
-    if (compressed) {
-        return bytes_in_type + 1;
-    } else {
-        return 2 * bytes_in_type + 1;
-    }
-}
-pub fn serializePoint(point: CurvePoint, comptime compressed: bool, out: *[bytesNeeded(NumberType, compressed)]u8) void {
+pub fn serializePoint(point: CurvePoint, comptime compressed: bool, out: *[if (compressed) 33 else 65]u8) void {
     assert(point.x != null and point.y != null); // @TODO infinity
     assert(point.x.?.prime == secp256k1_p);
-    const bytes_in_number_type = @divExact(@typeInfo(NumberType).Int.bits, 8);
-    var x_bytes: [bytes_in_number_type]u8 = undefined;
-    std.mem.writeInt(NumberType, &x_bytes, point.x.?.value, .big);
+    var x_bytes: [32]u8 = undefined;
+    std.mem.writeInt(u256, &x_bytes, point.x.?.value, .big);
 
     if (compressed) {
-        assert(out.len >= bytes_in_number_type + 1);
+        assert(out.len >= 33);
         if (point.y.?.value % 2 == 0) {
             out.* = [1]u8{0x02} ++ x_bytes;
         } else {
             out.* = [1]u8{0x03} ++ x_bytes;
         }
     } else {
-        assert(out.len >= 2 * bytes_in_number_type + 1);
-        var y_bytes: [bytes_in_number_type]u8 = undefined;
-        std.mem.writeInt(NumberType, &y_bytes, point.y.?.value, .big);
+        assert(out.len >= 65);
+        var y_bytes: [32]u8 = undefined;
+        std.mem.writeInt(u256, &y_bytes, point.y.?.value, .big);
         out.* = [1]u8{0x04} ++ x_bytes ++ y_bytes;
     }
 }
@@ -150,7 +170,7 @@ pub fn parsePoint(bytes: []const u8) CurvePoint {
         0x02, 0x03 => {
             assert(bytes.len == 33);
             const x = FieldElement.init(
-                std.mem.readInt(NumberType, bytes[1..33], .big),
+                std.mem.readInt(u256, bytes[1..33], .big),
                 secp256k1_p,
             );
             const y_squared = x.pow(3).add(secp256k1_b_fe);
@@ -165,8 +185,8 @@ pub fn parsePoint(bytes: []const u8) CurvePoint {
         },
         0x04 => {
             assert(bytes.len == 65);
-            const x = FieldElement.init(std.mem.readInt(NumberType, bytes[1..33], .big), secp256k1_p);
-            const y = FieldElement.init(std.mem.readInt(NumberType, bytes[33..65], .big), secp256k1_p);
+            const x = FieldElement.init(std.mem.readInt(u256, bytes[1..33], .big), secp256k1_p);
+            const y = FieldElement.init(std.mem.readInt(u256, bytes[33..65], .big), secp256k1_p);
             return CurvePoint.init(x, y, secp256k1_a_fe, secp256k1_b_fe);
         },
         else => unreachable,
@@ -176,18 +196,18 @@ pub fn parsePoint(bytes: []const u8) CurvePoint {
 pub fn serializeSignature(sig: Signature, out: *[72]u8) void {
     const bytes_0_to_5 = [_]u8{ 0x30, 0x46, 0x02, 0x21, 0x00 };
     std.mem.copyForwards(u8, out[0..5], &bytes_0_to_5);
-    std.mem.writeInt(NumberType, out[5..37], sig.r, .big);
+    std.mem.writeInt(u256, out[5..37], sig.r, .big);
     const bytes_37_to_39 = [_]u8{ 0x02, 0x21 };
     std.mem.copyForwards(u8, out[37..39], &bytes_37_to_39);
-    std.mem.writeInt(NumberType, out[39..71], sig.s, .big);
+    std.mem.writeInt(u256, out[39..71], sig.s, .big);
 }
 
 pub fn parseSignature(bytes: []const u8) Signature {
     assert(bytes.len == 72);
     assert(bytes[0] == 0x30 and bytes[1] == 0x46);
     return .{
-        .r = std.mem.readInt(NumberType, bytes[5..37], .big),
-        .s = std.mem.readInt(NumberType, bytes[39..71], .big),
+        .r = std.mem.readInt(u256, bytes[5..37], .big),
+        .s = std.mem.readInt(u256, bytes[39..71], .big),
     };
 }
 
@@ -253,53 +273,8 @@ pub const Tx = struct {
     locktime: u32,
 };
 
-// For little endian reading
-const Cursor = struct {
-    data: []const u8,
-    index: usize = 0,
-
-    fn ended(self: *Cursor) bool {
-        return self.index == self.data.len;
-    }
-
-    fn assertCanRead(self: *Cursor, n_bytes: usize) void {
-        if (self.index + n_bytes > self.data.len) {
-            const message = std.fmt.allocPrint(
-                allocator,
-                "Trying to read {} bytes at index {} when the data is only {} bytes (only {} could be read)",
-                .{ n_bytes, self.index, self.data.len, self.data.len - self.index },
-            ) catch unreachable;
-            @panic(message);
-        }
-    }
-
-    fn readInt(self: *Cursor, comptime T: type) T {
-        comptime assert(@typeInfo(T).Int.signedness == .unsigned);
-        self.assertCanRead(@sizeOf(T));
-        const n_bytes = @divExact(@typeInfo(T).Int.bits, 8);
-        const ret = std.mem.readInt(T, self.data[self.index..][0..n_bytes], .little);
-        self.index += @sizeOf(T);
-        return ret;
-    }
-
-    fn readVarint(self: *Cursor) u32 {
-        const first_byte = self.readInt(u8);
-        return switch (first_byte) {
-            else => @intCast(first_byte),
-            0xfd => return @intCast(self.readInt(u16)),
-            0xfe => return @intCast(self.readInt(u24)),
-            0xff => return @intCast(self.readInt(u32)),
-        };
-    }
-
-    fn readBytes(self: *Cursor, dest: []u8) void {
-        std.mem.copyForwards(u8, dest, self.data[self.index..][0..dest.len]);
-        self.index += dest.len;
-    }
-};
-
 pub fn parseTx(data: []u8) !Tx {
-    var cursor: Cursor = .{ .data = data };
+    var cursor = Cursor.init(data);
     var tx: Tx = undefined;
 
     tx.version = cursor.readInt(u32);
@@ -339,213 +314,222 @@ pub fn parseTx(data: []u8) !Tx {
     return tx;
 }
 
-const ScriptStack = struct {
-    data: []u8,
+pub const Script = struct {
+    const Stack = struct {
+        data: []u8,
 
-    /// Points to first empty index
-    top: usize = 0,
+        /// Points to first empty index
+        top: usize = 0,
 
-    //Same behaviour as Bitcoin Core:
-    //   "Numeric opcodes (OP_ADD, etc) are restricted to operating on 4-byte integers.
-    //    The semantics are subtle, though: operands must be in the range [-2^31 +1...2^31 -1],
-    //    but results may overflow (and are valid as long as they are not used in a subsequent
-    //    numeric operation). CScriptNum enforces those semantics by storing results as
-    //    an int64 and allowing out-of-range values to be returned as a vector of bytes but
-    //    throwing an exception if arithmetic is done or the result is interpreted as an integer."
-    const Int = i64;
+        //Same behaviour as Bitcoin Core:
+        //   "Numeric opcodes (OP_ADD, etc) are restricted to operating on 4-byte integers.
+        //    The semantics are subtle, though: operands must be in the range [-2^31 +1...2^31 -1],
+        //    but results may overflow (and are valid as long as they are not used in a subsequent
+        //    numeric operation). CScriptNum enforces those semantics by storing results as
+        //    an int64 and allowing out-of-range values to be returned as a vector of bytes but
+        //    throwing an exception if arithmetic is done or the result is interpreted as an integer."
+        const Int = i64;
 
-    const Self = @This();
+        const Self = @This();
 
-    fn init(size: usize) !Self {
-        return .{ .data = try allocator.alloc(u8, size) };
-    }
-
-    fn deinit(self: *Self) void {
-        allocator.free(self.data);
-    }
-
-    fn push(self: *Self, value: []const u8) void {
-        std.mem.copyForwards(u8, self.data[self.top..][0..value.len], value);
-        self.top += value.len;
-        if (value.len > std.math.maxInt(u8))
-            @panic("Not handling this case yet: pushing more than 255 bytes");
-        self.data[self.top] = @intCast(value.len);
-        self.top += 1;
-    }
-
-    fn pushInt(self: *Self, value: Self.Int) void {
-        push(self, std.mem.asBytes(&value));
-    }
-
-    fn pop(self: *Self) ![]u8 {
-        if (self.top == 0)
-            return error.EmptyStack;
-        self.top -= 1;
-        const next_byte = self.data[self.top];
-        if (self.data.len < next_byte)
-            return error.Corrupted;
-        if (next_byte == 0)
-            return &[_]u8{};
-        const ret = self.data[self.top - next_byte .. self.top];
-        self.top -= next_byte;
-        return ret;
-    }
-    fn popInt(self: *Self) !Self.Int {
-        const data = try self.pop();
-        if (data.len > 4) {
-            return error.NotAnOperableInteger;
-        } else if (data.len == 4) {
-            const data_as_unsigned: *u32 = @ptrCast(@alignCast(data));
-            const sign_as_int: Self.Int = if (data_as_unsigned.* & 0x80000000 != 0) -1 else 1;
-            const value: Self.Int = (data_as_unsigned.* & 0x7FFFFFFF);
-
-            return sign_as_int * value;
-        } else if (data.len == 1) {
-            // when less than 4 bytes, the value can't be signed
-            return @as(Self.Int, @intCast(data[0]));
-        } else {
-            @panic("Not handling this case yet: popping more than 1 but less than 4 bytes");
+        fn init(size: usize) !Self {
+            return .{ .data = try allocator.alloc(u8, size) };
         }
-    }
-};
 
-// I don't want type safety since the script opcodes are not exhaustive,
-// that's why it's not an enum
-pub const OP_0: u8 = 0;
-pub const OP_1: u8 = 0x51;
-pub const OP_2: u8 = 0x52;
-pub const OP_3: u8 = 0x53;
-pub const OP_4: u8 = 0x54;
-pub const OP_5: u8 = 0x55;
-pub const OP_6: u8 = 0x56;
-pub const OP_7: u8 = 0x57;
-pub const OP_8: u8 = 0x58;
-pub const OP_9: u8 = 0x59;
-pub const OP_10: u8 = 0x5a;
-pub const OP_11: u8 = 0x5b;
-pub const OP_12: u8 = 0x5c;
-pub const OP_13: u8 = 0x5d;
-pub const OP_14: u8 = 0x5e;
-pub const OP_15: u8 = 0x5f;
-pub const OP_16: u8 = 0x60;
-pub const OP_PUSHDATA1: u8 = 0x4c;
-pub const OP_PUSHDATA2: u8 = 0x4d;
-pub const OP_PUSHDATA4: u8 = 0x4e;
-pub const OP_VERIFY: u8 = 0x69;
-pub const OP_2DUP: u8 = 0x6e;
-pub const OP_DUP: u8 = 0x76;
-pub const OP_EQUAL: u8 = 0x87;
-pub const OP_EQUALVERIFY: u8 = 0x88;
-pub const OP_NOT: u8 = 0x91;
-pub const OP_ADD: u8 = 0x93;
-pub const OP_SUB: u8 = 0x94;
-pub const OP_SHA256: u8 = 0xa8;
-
-fn scriptStackVerify(stack: *ScriptStack) !void {
-    const value = try stack.pop();
-    const all_zero = for (value, 0..) |byte, index| {
-        if (index == value.len - 1 and byte == 0x80) continue;
-        if (byte != 0) break false;
-    } else true;
-    if (value.len == 0 or all_zero) {
-        return error.VerifyFailed;
-    }
-}
-
-fn runScript(script: []const u8, stack: *ScriptStack) !void {
-    var scriptReader = Cursor{ .data = script };
-    while (!scriptReader.ended()) {
-        const opcode = scriptReader.readInt(u8);
-        switch (opcode) {
-            0x01...0x4b => { // Data
-                stack.push(script[scriptReader.index..][0..opcode]);
-                scriptReader.index += @intCast(opcode);
-            },
-            OP_0 => {
-                stack.push(&[_]u8{});
-            },
-            OP_1...OP_16 => { // OP_1 to OP_16
-                stack.push(&[1]u8{opcode - 0x50});
-            },
-            OP_PUSHDATA1 => {
-                const size = scriptReader.readInt(u8);
-                stack.push(script[scriptReader.index..][0..size]);
-                scriptReader.index += @intCast(size);
-            },
-            OP_VERIFY => {
-                try scriptStackVerify(stack);
-            },
-            OP_2DUP => {
-                const a: []u8 = try stack.pop();
-                const b: []u8 = try stack.pop();
-                stack.push(a);
-                stack.push(b);
-                stack.push(a);
-                stack.push(b);
-            },
-            OP_DUP => {
-                const value: []u8 = try stack.pop();
-                stack.push(value);
-                stack.push(value);
-            },
-            OP_EQUAL => {
-                const a: []u8 = try stack.pop();
-                const b: []u8 = try stack.pop();
-                const eq: u8 = if (std.mem.eql(u8, a, b)) 1 else 0;
-                stack.push(&[1]u8{eq});
-            },
-            OP_EQUALVERIFY => {
-                const a: []u8 = try stack.pop();
-                const b: []u8 = try stack.pop();
-                if (!std.mem.eql(u8, a, b)) {
-                    return error.VerifyFailed;
-                }
-            },
-            OP_NOT => {
-                const value: []u8 = try stack.pop();
-                const equals_zero: u8 = for (value) |byte| {
-                    if (byte != 0) break 0;
-                } else 1;
-                stack.push(&[1]u8{equals_zero});
-            },
-            OP_ADD => {
-                const a: i64 = try stack.popInt();
-                const b: i64 = try stack.popInt();
-                const value: i64 = a + b;
-                stack.pushInt(value);
-            },
-            OP_SUB => {
-                const a: i64 = try stack.popInt();
-                const b: i64 = try stack.popInt();
-                const value: i64 = a - b;
-                stack.pushInt(value);
-            },
-            OP_SHA256 => {
-                const value: []u8 = try stack.pop();
-                var value_hash: [32]u8 = undefined;
-                Sha256.hash(value, &value_hash, .{});
-                stack.push(&value_hash);
-            },
-            else => @panic(try std.fmt.allocPrint(allocator, "Opcode {} not implemented\n", .{opcode})),
+        fn deinit(self: *Self) void {
+            allocator.free(self.data);
         }
-    }
-}
 
-pub fn validateScript(scriptSig: []const u8, scriptPubKey: []const u8) !bool {
-    var stack = try ScriptStack.init(scriptSig.len + scriptPubKey.len); // @TODO is this reasonable?
-    defer stack.deinit();
+        fn push(self: *Self, value: []const u8) void {
+            std.mem.copyForwards(u8, self.data[self.top..][0..value.len], value);
+            self.top += value.len;
+            if (value.len > std.math.maxInt(u8))
+                @panic("Not handling this case yet: pushing more than 255 bytes");
+            self.data[self.top] = @intCast(value.len);
+            self.top += 1;
+        }
 
-    runScript(scriptSig, &stack) catch return false;
-    runScript(scriptPubKey, &stack) catch return false;
+        fn pushInt(self: *Self, value: Self.Int) void {
+            push(self, std.mem.asBytes(&value));
+        }
 
-    scriptStackVerify(&stack) catch |err| {
-        if (err == error.EmptyStack)
+        const PopError = error{ EmptyStack, Corrupted };
+        fn pop(self: *Self) PopError![]u8 {
+            if (self.top == 0)
+                return error.EmptyStack;
+            self.top -= 1;
+            const next_byte = self.data[self.top];
+            if (self.data.len < next_byte)
+                return error.Corrupted;
+            if (next_byte == 0)
+                return &[_]u8{};
+            const ret = self.data[self.top - next_byte .. self.top];
+            self.top -= next_byte;
+            return ret;
+        }
+
+        const PopIntError = PopError || error{NotAnOperableInteger};
+        fn popInt(self: *Self) PopIntError!Self.Int {
+            const data = try self.pop();
+            if (data.len > 4) {
+                return error.NotAnOperableInteger;
+            } else if (data.len == 4) {
+                const data_as_unsigned: *u32 = @ptrCast(@alignCast(data));
+                const sign_as_int: Self.Int = if (data_as_unsigned.* & 0x80000000 != 0) -1 else 1;
+                const value: Self.Int = (data_as_unsigned.* & 0x7FFFFFFF);
+
+                return sign_as_int * value;
+            } else if (data.len == 1) {
+                // when less than 4 bytes, the value can't be signed
+                return @as(Self.Int, @intCast(data[0]));
+            } else {
+                @panic("Not handling this case yet: popping more than 1 but less than 4 bytes");
+            }
+        }
+
+        // Only false when top value is existent AND not true.
+        // Zero, negative zero and empty array are all treated as false.
+        // Anything else is treated as true.
+        fn verify(self: *Stack) bool {
+            const value = self.pop() catch |err| return err == error.EmptyStack;
+            const all_zero = for (value, 0..) |byte, index| {
+                if (index == value.len - 1 and byte == 0x80) continue; // account for negative zero
+                if (byte != 0) break false;
+            } else true;
+            if (value.len == 0 or all_zero) {
+                return false;
+            }
             return true;
-        return false;
+        }
     };
 
-    return true;
-}
+    // This must not be an enum. An enum is a type. I want constants of type u8
+    pub const Opcode = struct {
+        pub const OP_0: u8 = 0;
+        pub const OP_1: u8 = 0x51;
+        pub const OP_2: u8 = 0x52;
+        pub const OP_3: u8 = 0x53;
+        pub const OP_4: u8 = 0x54;
+        pub const OP_5: u8 = 0x55;
+        pub const OP_6: u8 = 0x56;
+        pub const OP_7: u8 = 0x57;
+        pub const OP_8: u8 = 0x58;
+        pub const OP_9: u8 = 0x59;
+        pub const OP_10: u8 = 0x5a;
+        pub const OP_11: u8 = 0x5b;
+        pub const OP_12: u8 = 0x5c;
+        pub const OP_13: u8 = 0x5d;
+        pub const OP_14: u8 = 0x5e;
+        pub const OP_15: u8 = 0x5f;
+        pub const OP_16: u8 = 0x60;
+        pub const OP_PUSHDATA1: u8 = 0x4c;
+        pub const OP_PUSHDATA2: u8 = 0x4d;
+        pub const OP_PUSHDATA4: u8 = 0x4e;
+        pub const OP_VERIFY: u8 = 0x69;
+        pub const OP_2DUP: u8 = 0x6e;
+        pub const OP_DUP: u8 = 0x76;
+        pub const OP_EQUAL: u8 = 0x87;
+        pub const OP_EQUALVERIFY: u8 = 0x88;
+        pub const OP_NOT: u8 = 0x91;
+        pub const OP_ADD: u8 = 0x93;
+        pub const OP_SUB: u8 = 0x94;
+        pub const OP_SHA256: u8 = 0xa8;
+    };
+
+    pub fn run(script: []const u8, stack: *Stack) error{ BadScript, VerifyFailed }!void {
+        const Op = Opcode;
+        var scriptReader = Cursor.init(script);
+        while (!scriptReader.ended()) {
+            const opcode = scriptReader.readInt(u8);
+            switch (opcode) {
+                0x01...0x4b => { // Data
+                    stack.push(script[scriptReader.index..][0..opcode]);
+                    scriptReader.index += @intCast(opcode);
+                },
+                Op.OP_0 => {
+                    stack.push(&[_]u8{});
+                },
+                Op.OP_1...Op.OP_16 => { // OP_1 to OP_16
+                    stack.push(&[1]u8{opcode - 0x50});
+                },
+                Op.OP_PUSHDATA1 => {
+                    const size = scriptReader.readInt(u8);
+                    stack.push(script[scriptReader.index..][0..size]);
+                    scriptReader.index += @intCast(size);
+                },
+                Op.OP_VERIFY => {
+                    if (!stack.verify())
+                        return error.VerifyFailed;
+                },
+                Op.OP_2DUP => {
+                    const a: []u8 = stack.pop() catch return error.BadScript;
+                    const b: []u8 = stack.pop() catch return error.BadScript;
+                    stack.push(a);
+                    stack.push(b);
+                    stack.push(a);
+                    stack.push(b);
+                },
+                Op.OP_DUP => {
+                    const value: []u8 = stack.pop() catch return error.BadScript;
+                    stack.push(value);
+                    stack.push(value);
+                },
+                Op.OP_EQUAL => {
+                    const a: []u8 = stack.pop() catch return error.BadScript;
+                    const b: []u8 = stack.pop() catch return error.BadScript;
+                    const eq: u8 = if (std.mem.eql(u8, a, b)) 1 else 0;
+                    stack.push(&[1]u8{eq});
+                },
+                Op.OP_EQUALVERIFY => {
+                    const a: []u8 = stack.pop() catch return error.BadScript;
+                    const b: []u8 = stack.pop() catch return error.BadScript;
+                    if (!std.mem.eql(u8, a, b)) {
+                        return error.VerifyFailed;
+                    }
+                },
+                Op.OP_NOT => {
+                    const value: []u8 = stack.pop() catch return error.BadScript;
+                    const equals_zero: u8 = for (value) |byte| {
+                        if (byte != 0) break 0;
+                    } else 1;
+                    stack.push(&[1]u8{equals_zero});
+                },
+                Op.OP_ADD => {
+                    const a: i64 = stack.popInt() catch return error.BadScript;
+                    const b: i64 = stack.popInt() catch return error.BadScript;
+                    const value: i64 = a + b;
+                    stack.pushInt(value);
+                },
+                Op.OP_SUB => {
+                    const a: i64 = stack.popInt() catch return error.BadScript;
+                    const b: i64 = stack.popInt() catch return error.BadScript;
+                    const value: i64 = a - b;
+                    stack.pushInt(value);
+                },
+                Op.OP_SHA256 => {
+                    const value: []u8 = stack.pop() catch return error.BadScript;
+                    var value_hash: [32]u8 = undefined;
+                    Sha256.hash(value, &value_hash, .{});
+                    stack.push(&value_hash);
+                },
+                else => {
+                    const msg = std.fmt.allocPrint(allocator, "Opcode {} not implemented\n", .{opcode}) catch @panic("While running a Script, a not implemented Opcode was found");
+                    @panic(msg);
+                },
+            }
+        }
+    }
+
+    pub fn validate(scriptSig: []const u8, scriptPubKey: []const u8) !bool {
+        var stack = try Stack.init(scriptSig.len + scriptPubKey.len); // @TODO is this reasonable?
+        defer stack.deinit();
+
+        run(scriptSig, &stack) catch return false;
+        run(scriptPubKey, &stack) catch return false;
+
+        return stack.verify();
+    }
+};
 
 //#endregion
 
@@ -558,13 +542,13 @@ test "order of G is indeed n" {
 }
 
 test "hash" {
-    const hash_result = hash("The quick brown fox jumps over the lazy dog");
+    const hash_result = hashAsU256("The quick brown fox jumps over the lazy dog");
     try expect(hash_result == 0xd7a8fbb307d7809469ca9abcb0082e4f8d5651e46d3cdb762d02d0bf37c9e592);
 }
 
 test "signing message" {
     const keys = generateKeyPair();
-    const z = hash("my message");
+    const z = hashAsU256("my message");
     const signature: Signature = sign(z, keys.prvk);
     const valid = verify(z, keys.pubk, signature);
     try expect(valid);
@@ -573,12 +557,12 @@ test "signing message" {
 test "sec serialization and parsing" {
     const p1 = G.muli(3858);
 
-    var p1_uncompressed: [1 + 2 * @divExact(@typeInfo(NumberType).Int.bits, 8)]u8 = undefined;
+    var p1_uncompressed: [65]u8 = undefined;
     serializePoint(p1, false, &p1_uncompressed);
     const p1_uncompressed_parsed = parsePoint(p1_uncompressed[0..]);
     try expect(p1_uncompressed_parsed.eq(p1));
 
-    var p1_compressed: [1 + @divExact(@typeInfo(NumberType).Int.bits, 8)]u8 = undefined;
+    var p1_compressed: [33]u8 = undefined;
     serializePoint(p1, true, &p1_compressed);
     const p1_compressed_parsed = parsePoint(p1_compressed[0..]);
     try expect(p1_compressed_parsed.eq(p1));
@@ -586,8 +570,8 @@ test "sec serialization and parsing" {
 
 test "serialized signature" {
     const sig: Signature = .{
-        .r = hash("idk"),
-        .s = hash("anything"),
+        .r = hashAsU256("idk"),
+        .s = hashAsU256("anything"),
     };
     var serialized_sig: [72]u8 = undefined;
     serializeSignature(sig, &serialized_sig);
@@ -639,9 +623,10 @@ test "Basic script" {
         std.crypto.hash.sha2.Sha256.hash(answer, &buf, .{});
         break :answer_hash buf;
     };
-    const script_pub_key = [_]u8{OP_SHA256} ++ [1]u8{answer_hash.len} ++ answer_hash ++ [_]u8{ OP_EQUAL, OP_VERIFY };
-    const script_sig = [_]u8{OP_PUSHDATA1} ++ [1]u8{answer.len} ++ answer.*;
-    try expect(try validateScript(&script_sig, &script_pub_key));
+    const Op = Script.Opcode;
+    const script_pub_key = [_]u8{Op.OP_SHA256} ++ [1]u8{answer_hash.len} ++ answer_hash ++ [_]u8{ Op.OP_EQUAL, Op.OP_VERIFY };
+    const script_sig = [_]u8{Op.OP_PUSHDATA1} ++ [1]u8{answer.len} ++ answer.*;
+    try expect(try Script.validate(&script_sig, &script_pub_key));
 }
 
 //#endregion

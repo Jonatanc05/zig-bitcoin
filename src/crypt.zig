@@ -211,27 +211,60 @@ pub fn parseSignature(bytes: []const u8) Signature {
     };
 }
 
-pub fn base58Encode(bytes: []const u8, out: []u8) usize {
-    if (bytes.len > 128) @panic("base58Encode: bytes is too large, only up to 128 bytes supported");
+pub const Base58 = struct {
     const alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-    var bytes_extended: [128]u8 = undefined;
-    if (bytes.len != 128)
-        bytes_extended = [_]u8{0} ** 128;
-    std.mem.copyForwards(u8, bytes_extended[(128 - bytes.len)..128], bytes);
 
-    const bytes_as_u1024: u1024 = std.mem.readInt(u1024, &bytes_extended, .big);
-    var remaining = bytes_as_u1024;
-    var i = out.len;
-    while (remaining > 0) {
-        if (i == 0) std.debug.panic("base58Encode: out is too small ({d} bytes) for the input {x}", .{ out.len, bytes_as_u1024 });
-        i = i - 1;
-        out[i] = alphabet[@intCast(remaining % 58)];
-        remaining = remaining / 58;
+    // returns in what index we can start reading the ouput
+    // reads bytes as big endian
+    pub fn encode(bytes: []const u8, out: []u8) usize {
+        if (bytes.len > 128) @panic("Base58.encode: bytes is too large, only up to 128 bytes supported");
+        var bytes_extended: [128]u8 = undefined;
+        if (bytes.len != 128)
+            bytes_extended = [_]u8{0} ** 128;
+        std.mem.copyForwards(u8, bytes_extended[(128 - bytes.len)..128], bytes);
+
+        const bytes_as_u1024: u1024 = std.mem.readInt(u1024, &bytes_extended, .big);
+        var remaining = bytes_as_u1024;
+        var i = out.len;
+        while (remaining > 0) {
+            if (i == 0) std.debug.panic("Base58.encode: out is too small ({d} bytes) for the input {x}", .{ out.len, bytes_as_u1024 });
+            i = i - 1;
+            out[i] = alphabet[@intCast(remaining % 58)];
+            remaining = remaining / 58;
+        }
+        return i;
     }
-    i = i - 1;
-    out[i] = alphabet[0];
-    return i;
-}
+
+    // returns in what index we can start reading the ouput
+    // writes out as big endian
+    pub fn decode(bytes: []const u8, out: *[1024 / 8]u8) usize {
+        var bytes_as_u1024: u1024 = 0;
+        {
+            var multiplier: u1024 = 1;
+            var i = bytes.len;
+            while (i > 0) : (i -= 1) {
+                bytes_as_u1024 += increment: {
+                    const algarism = bytes[i - 1];
+                    const algarism_value: u1024 = for (alphabet, 0..) |symbol, j| {
+                        if (symbol == algarism) break @intCast(j);
+                    } else @panic("Base58.decode: invalid character");
+                    break :increment algarism_value * multiplier;
+                };
+                const result = @mulWithOverflow(multiplier, @as(u1024, 58));
+                if (result[1] == 1) unreachable;
+                multiplier = result[0];
+            }
+        }
+
+        var i = out.len;
+        while (i > 0) : (i -= 1) {
+            out[i - 1] = @as(u8, @truncate(bytes_as_u1024));
+            bytes_as_u1024 >>= 8;
+            if (bytes_as_u1024 == 0) return i - 1;
+        }
+        return 0;
+    }
+};
 
 //#endregion
 
@@ -253,7 +286,9 @@ pub fn btcAddress(pubkey: CurvePoint, out: *const []u8, testnet: bool) usize {
     var checksum: [4]u8 = undefined;
     std.mem.copyForwards(u8, &checksum, sha256_3[0..4]);
     const address = hash160 ++ checksum;
-    return base58Encode(&address, out.*);
+    const start = Base58.encode(&address, out.*[0..]);
+    out.*[start - 1] = '1';
+    return start - 1;
 }
 
 pub const TxOutput = struct {
@@ -579,11 +614,15 @@ test "serialized signature" {
     try expect(sig_parsed.r == sig.r and sig_parsed.s == sig.s);
 }
 
-test "base58 encoding" {
+test "base58 encoding and decoding" {
     const u8_array = [8]u8{ 0x00, 0x00, 0x04, 0x09, 0x0a, 0x0f, 0x1a, 0xff };
     var encoded_u8_array: [10]u8 = undefined;
-    const start = base58Encode(&u8_array, &encoded_u8_array);
-    try expect(std.mem.eql(u8, encoded_u8_array[start..], "131Yr1PVY"));
+    const start = Base58.encode(&u8_array, &encoded_u8_array);
+    try expect(std.mem.eql(u8, encoded_u8_array[start..], "31Yr1PVY"));
+
+    var decoded: [128]u8 = undefined;
+    const start_d = Base58.decode(encoded_u8_array[start..], &decoded);
+    try expect(std.mem.eql(u8, decoded[start_d..], u8_array[2..]));
 }
 
 test "btc address" {

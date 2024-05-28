@@ -92,11 +92,15 @@ pub fn main() !void {
         const p1_compressed_parsed = CryptLib.parsePoint(p1_compressed[0..]);
         print("parsed(compressed(p1)) == p1: {}\n", .{p1_compressed_parsed.eq(p1)});
 
-        const u8_array = [8]u8{ 0x00, 0x00, 0x04, 0x09, 0x0a, 0x0f, 0x1a, 0xff };
-        print("\nu8_array: {any}\n", .{u8_array});
-        var encoded_u8_array: [10]u8 = undefined;
-        const start = CryptLib.base58Encode(&u8_array, &encoded_u8_array);
-        print("base58Encode(u8_array): {s}\n\n", .{encoded_u8_array[start..]});
+        const u8_array = [_]u8{ 0x00, 0x00, 0x04, 0x09, 0x0a, 0x0f, 0x1a, 0xff };
+        print("\nu8_array: {x}\n", .{u8_array});
+        var encoded: [10]u8 = undefined;
+        const start = CryptLib.Base58.encode(&u8_array, &encoded);
+        print("Base58.encode(u8_array): {s}\n", .{encoded[start..]});
+        var decoded: [128]u8 = undefined;
+        const start_d = CryptLib.Base58.decode(encoded[start..], &decoded);
+        print("Base58.decode(encoded): {x}\n", .{decoded[start_d..]});
+        print("Decoded equals original: {}\n\n", .{std.mem.eql(u8, decoded[start_d..], u8_array[2..])});
     }
 
     print("------------ Generating BTC Address ------------\n", .{});

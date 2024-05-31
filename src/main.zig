@@ -2,15 +2,16 @@ const std = @import("std");
 const print = std.debug.print;
 
 const EllipticCurveLib = @import("elliptic-curve.zig");
-const fe = EllipticCurveLib.fieldElementShortcut;
-const CurvePoint = EllipticCurveLib.CurvePoint;
+const fe = EllipticCurveLib.FieldElement(u256).fieldElementShortcut;
+const CurvePoint = EllipticCurveLib.CurvePoint(u256);
+const Bitcoin = @import("bitcoin.zig");
 
-const CryptLib = @import("crypt.zig");
+const CryptLib = @import("cryptography.zig");
 
 pub fn main() !void {
     print("\n------------- FiniteFields -------------\n", .{});
     {
-        EllipticCurveLib.setGlobalPrime(13);
+        EllipticCurveLib.FieldElement(u256).setGlobalPrime(13);
         const a = fe(10);
         const b = fe(5);
         print("Element a: {}\n", .{a});
@@ -27,7 +28,7 @@ pub fn main() !void {
 
     print("------------- EllipticCurves -------------\n", .{});
     {
-        EllipticCurveLib.setGlobalPrime(223);
+        EllipticCurveLib.FieldElement(u256).setGlobalPrime(223);
         const a = fe(0);
         const b = fe(7);
         const p1 = CurvePoint.init(fe(192), fe(105), a, b);
@@ -71,50 +72,50 @@ pub fn main() !void {
         print("p1.y: 0x{x:0>64}\n", .{p1.y.?.value});
 
         var p1_uncompressed: [65]u8 = undefined;
-        CryptLib.serializePoint(p1, false, &p1_uncompressed);
+        p1.serialize(false, &p1_uncompressed);
         print("serialized(p1): 0x", .{});
         for (p1_uncompressed) |b| {
             print("{x:0>2}", .{b});
         }
         print("\n", .{});
 
-        const p1_uncompressed_parsed = CryptLib.parsePoint(p1_uncompressed[0..]);
+        const p1_uncompressed_parsed = CurvePoint.parse(p1_uncompressed[0..], CryptLib.secp256k1_p, CryptLib.G.a, CryptLib.G.b);
         print("parsed(serialized(p1)) == p1: {}\n", .{p1_uncompressed_parsed.eq(p1)});
 
         var p1_compressed: [33]u8 = undefined;
-        CryptLib.serializePoint(p1, true, &p1_compressed);
+        p1.serialize(true, &p1_compressed);
         print("compressed(p1): 0x", .{});
         for (p1_compressed) |b| {
             print("{x:0>2}", .{b});
         }
         print("\n", .{});
 
-        const p1_compressed_parsed = CryptLib.parsePoint(p1_compressed[0..]);
+        const p1_compressed_parsed = CurvePoint.parse(p1_compressed[0..], CryptLib.secp256k1_p, CryptLib.G.a, CryptLib.G.b);
         print("parsed(compressed(p1)) == p1: {}\n", .{p1_compressed_parsed.eq(p1)});
 
         const u8_array = [_]u8{ 0x00, 0x00, 0x04, 0x09, 0x0a, 0x0f, 0x1a, 0xff };
         print("\nu8_array: {x}\n", .{u8_array});
         var encoded: [10]u8 = undefined;
-        const start = CryptLib.Base58.encode(&u8_array, &encoded);
+        const start = Bitcoin.Base58.encode(&u8_array, &encoded);
         print("Base58.encode(u8_array): {s}\n", .{encoded[start..]});
         var decoded: [128]u8 = undefined;
-        const start_d = CryptLib.Base58.decode(encoded[start..], &decoded);
+        const start_d = Bitcoin.Base58.decode(encoded[start..], &decoded);
         print("Base58.decode(encoded): {x}\n", .{decoded[start_d..]});
         print("Decoded equals original: {}\n\n", .{std.mem.eql(u8, decoded[start_d..], u8_array[2..])});
     }
 
     print("------------ Generating BTC Address ------------\n", .{});
     {
-        const testnet = false;
+        const testnet = true;
         print("testnet: {}\n", .{testnet});
         const prvk = 0xF45E6907B16670196E487CF667E9FA510F0593276335DA22311EB67C90D46421;
         print("prvkey: {x}\n", .{prvk});
         const pubk = CryptLib.G.muli(prvk);
         var serialized_pubk: [33]u8 = undefined;
-        CryptLib.serializePoint(pubk, true, &serialized_pubk);
+        pubk.serialize(true, &serialized_pubk);
         print("pubkey (SEC compressed): {x}\n", .{serialized_pubk});
         var address: [40]u8 = undefined;
-        const start = CryptLib.btcAddress(pubk, &address[0..], testnet);
+        const start = Bitcoin.btcAddress(pubk, &address[0..], testnet);
         print("address: {s}\n", .{address[start..]});
     }
 
@@ -137,10 +138,10 @@ pub fn main() !void {
                 0x00, 0x00, 0x00, 0x00 // locktime
             };
             // zig fmt: on
-        const transaction = try CryptLib.parseTx(transaction_bytes[0..transaction_bytes.len]);
+        const transaction = try Bitcoin.Tx.parse(transaction_bytes[0..transaction_bytes.len]);
         print("transaction: {any}\n", .{transaction});
     }
-    //
+
     print("\n------------------- Script -------------------\n", .{});
     {
         const answer = "And he answering said, Thou shalt love the Lord thy God with all thy heart, and with all thy soul, and with all thy strength, and with all thy mind; and thy neighbour as thyself.";
@@ -151,12 +152,12 @@ pub fn main() !void {
             break :answer_hash buf;
         };
         print("h(answer): {x}\n", .{answer_hash});
-        const Op = CryptLib.Script.Opcode;
+        const Op = Bitcoin.Script.Opcode;
         const script_pub_key = [_]u8{Op.OP_SHA256} ++ [1]u8{answer_hash.len} ++ answer_hash ++ [_]u8{ Op.OP_EQUAL, Op.OP_VERIFY };
         print("script_pub_key: {x}\n", .{script_pub_key});
         const script_sig = [_]u8{Op.OP_PUSHDATA1} ++ [1]u8{answer.len} ++ answer.*;
         print("script_sig: {x}\n", .{script_sig});
-        const valid = CryptLib.Script.validate(&script_sig, &script_pub_key);
+        const valid = Bitcoin.Script.validate(&script_sig, &script_pub_key, null, null);
         print("valid: {any}\n", .{valid});
     }
 }

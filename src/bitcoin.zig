@@ -1,215 +1,18 @@
-const c_ripemd = @cImport({
-    @cInclude("ripemd.c");
-});
+// std
 const std = @import("std");
 const assert = std.debug.assert;
 var allocator = std.heap.page_allocator;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
+// not managed dependencies
+const c_ripemd = @cImport({
+    @cInclude("ripemd.c");
+});
+
+// managed dependencies
 const EllipticCurveLib = @import("elliptic-curve.zig");
-const modpow = EllipticCurveLib.modpow;
-const FieldElement = EllipticCurveLib.FieldElement;
-const CurvePoint = EllipticCurveLib.CurvePoint;
-
-comptime {
-    if (EllipticCurveLib.NumberType != u256 or EllipticCurveLib.MulExtendedNumberType != u512) {
-        // This is because we use secp256k1
-        @compileError("Only NumberType = u256 is supported");
-    }
-}
-
-const Cursor = struct {
-    data: []const u8,
-    index: usize = 0,
-
-    fn init(data: []const u8) Cursor {
-        return Cursor{ .data = data };
-    }
-
-    fn ended(self: *Cursor) bool {
-        return self.index == self.data.len;
-    }
-
-    fn assertCanRead(self: *Cursor, n_bytes: usize) void {
-        if (self.index + n_bytes > self.data.len) {
-            const message = std.fmt.allocPrint(
-                allocator,
-                "Trying to read {} bytes at index {} when the data is only {} bytes (only {} could be read)",
-                .{ n_bytes, self.index, self.data.len, self.data.len - self.index },
-            ) catch unreachable;
-            @panic(message);
-        }
-    }
-
-    // Little endian
-    fn readInt(self: *Cursor, comptime T: type) T {
-        comptime assert(@typeInfo(T).Int.signedness == .unsigned);
-        self.assertCanRead(@sizeOf(T));
-        const n_bytes = @divExact(@typeInfo(T).Int.bits, 8);
-        const ret = std.mem.readInt(T, self.data[self.index..][0..n_bytes], .little);
-        self.index += @sizeOf(T);
-        return ret;
-    }
-
-    fn readVarint(self: *Cursor) u32 {
-        const first_byte = self.readInt(u8);
-        return switch (first_byte) {
-            else => @intCast(first_byte),
-            0xfd => return @intCast(self.readInt(u16)),
-            0xfe => return @intCast(self.readInt(u24)),
-            0xff => return @intCast(self.readInt(u32)),
-        };
-    }
-
-    fn readBytes(self: *Cursor, dest: []u8) void {
-        self.assertCanRead(dest.len);
-        std.mem.copyForwards(u8, dest, self.data[self.index..][0..dest.len]);
-        self.index += dest.len;
-    }
-};
-
-//#region CRYPTOGRAPHY #########################################################################
-
-const secp256k1_a = 0;
-const secp256k1_b = 7;
-const secp256k1_a_fe = FieldElement.init(secp256k1_a, secp256k1_p);
-const secp256k1_b_fe = FieldElement.init(secp256k1_b, secp256k1_p);
-
-pub const G = CurvePoint.init(
-    FieldElement.init(0x79be667e_f9dcbbac_55a06295_ce870b07_029bfcdb_2dce28d9_59f2815b_16f81798, secp256k1_p),
-    FieldElement.init(0x483ada77_26a3c465_5da4fbfc_0e1108a8_fd17b448_a6855419_9c47d08f_fb10d4b8, secp256k1_p),
-    secp256k1_a_fe,
-    secp256k1_b_fe,
-);
-
-pub const secp256k1_p = 0xffffffff_ffffffff_ffffffff_ffffffff_ffffffff_ffffffff_fffffffe_fffffc2f;
-pub const secp256k1_n = 0xffffffff_ffffffff_ffffffff_fffffffe_baaedce6_af48a03b_bfd25e8c_d0364141;
-
-pub const Signature = struct {
-    r: u256,
-    s: u256,
-};
-
-pub fn hashAsU256(message: []const u8) u256 {
-    var z_bytes: [32]u8 = undefined;
-    Sha256.hash(message, &z_bytes, .{});
-    return std.mem.readInt(u256, &z_bytes, .big);
-}
-
-pub fn generateKeyPair() struct { pubk: CurvePoint, prvk: u256 } {
-    const e = std.crypto.random.int(u256);
-    const P = G.muli(e);
-    return .{ .pubk = P, .prvk = e };
-}
-
-pub fn sign(z: u256, e: u256) Signature {
-    const k = std.crypto.random.int(u256);
-    const r = G.muli(k).x.?.value;
-    const k_inv = modpow(k, secp256k1_n - 2, secp256k1_n);
-    const s: u256 = s_calc: { // s = (r * e + z) * k_inv (mod n)
-        var temp: u512 = r;
-        temp = temp * e;
-        temp = @mod(temp, secp256k1_n);
-        temp = temp + z;
-        temp = @mod(temp, secp256k1_n);
-        temp = temp * k_inv;
-        temp = @mod(temp, secp256k1_n);
-        break :s_calc @intCast(temp);
-    };
-    return Signature{ .r = r, .s = s };
-}
-
-pub fn verify(z: u256, P: CurvePoint, sig: Signature) bool {
-    const s_inv = modpow(sig.s, secp256k1_n - 2, secp256k1_n);
-
-    const u: u256 = u_calc: { // u = z * s_inv (mod n)
-        var temp: u512 = z;
-        temp = temp * s_inv;
-        temp = @mod(temp, secp256k1_n);
-        break :u_calc @intCast(temp);
-    };
-
-    const v: u256 = v_calc: { // v = r * s_inv (mod n)
-        var temp: u512 = sig.r;
-        temp = temp * s_inv;
-        temp = @mod(temp, secp256k1_n);
-        break :v_calc @intCast(temp);
-    };
-
-    return G.muli(u).add(P.muli(v)).x.?.value == sig.r;
-}
-
-//#endregion
-
-//#region SERIALIZATION #########################################################################
-
-pub fn serializePoint(point: CurvePoint, comptime compressed: bool, out: *[if (compressed) 33 else 65]u8) void {
-    assert(point.x != null and point.y != null); // @TODO infinity
-    assert(point.x.?.prime == secp256k1_p);
-    var x_bytes: [32]u8 = undefined;
-    std.mem.writeInt(u256, &x_bytes, point.x.?.value, .big);
-
-    if (compressed) {
-        assert(out.len >= 33);
-        if (point.y.?.value % 2 == 0) {
-            out.* = [1]u8{0x02} ++ x_bytes;
-        } else {
-            out.* = [1]u8{0x03} ++ x_bytes;
-        }
-    } else {
-        assert(out.len >= 65);
-        var y_bytes: [32]u8 = undefined;
-        std.mem.writeInt(u256, &y_bytes, point.y.?.value, .big);
-        out.* = [1]u8{0x04} ++ x_bytes ++ y_bytes;
-    }
-}
-
-pub fn parsePoint(bytes: []const u8) CurvePoint {
-    assert(bytes.len > 0);
-    switch (bytes[0]) {
-        0x02, 0x03 => {
-            assert(bytes.len == 33);
-            const x = FieldElement.init(
-                std.mem.readInt(u256, bytes[1..33], .big),
-                secp256k1_p,
-            );
-            const y_squared = x.pow(3).add(secp256k1_b_fe);
-            const y = modpow(y_squared.value, @divFloor(secp256k1_p + 1, 4), secp256k1_p);
-            const even_y = if (y % 2 == 0) FieldElement.init(y, secp256k1_p) else FieldElement.init(secp256k1_p - y, secp256k1_p);
-            const odd_y = if (y % 2 == 1) FieldElement.init(y, secp256k1_p) else FieldElement.init(secp256k1_p - y, secp256k1_p);
-            if (bytes[0] == 0x02) {
-                return CurvePoint.init(x, even_y, secp256k1_a_fe, secp256k1_b_fe);
-            } else if (bytes[0] == 0x03) {
-                return CurvePoint.init(x, odd_y, secp256k1_a_fe, secp256k1_b_fe);
-            } else unreachable;
-        },
-        0x04 => {
-            assert(bytes.len == 65);
-            const x = FieldElement.init(std.mem.readInt(u256, bytes[1..33], .big), secp256k1_p);
-            const y = FieldElement.init(std.mem.readInt(u256, bytes[33..65], .big), secp256k1_p);
-            return CurvePoint.init(x, y, secp256k1_a_fe, secp256k1_b_fe);
-        },
-        else => unreachable,
-    }
-}
-
-pub fn serializeSignature(sig: Signature, out: *[72]u8) void {
-    const bytes_0_to_5 = [_]u8{ 0x30, 0x46, 0x02, 0x21, 0x00 };
-    std.mem.copyForwards(u8, out[0..5], &bytes_0_to_5);
-    std.mem.writeInt(u256, out[5..37], sig.r, .big);
-    const bytes_37_to_39 = [_]u8{ 0x02, 0x21 };
-    std.mem.copyForwards(u8, out[37..39], &bytes_37_to_39);
-    std.mem.writeInt(u256, out[39..71], sig.s, .big);
-}
-
-pub fn parseSignature(bytes: []const u8) Signature {
-    assert(bytes.len == 72);
-    assert(bytes[0] == 0x30 and bytes[1] == 0x46);
-    return .{
-        .r = std.mem.readInt(u256, bytes[5..37], .big),
-        .s = std.mem.readInt(u256, bytes[39..71], .big),
-    };
-}
+const CryptLib = @import("cryptography.zig");
+const Cursor = @import("cursor.zig").Cursor;
 
 pub const Base58 = struct {
     const alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
@@ -266,13 +69,9 @@ pub const Base58 = struct {
     }
 };
 
-//#endregion
-
-//#region BITCOIN #########################################################################
-
-pub fn btcAddress(pubkey: CurvePoint, out: *const []u8, testnet: bool) usize {
+pub fn btcAddress(pubkey: EllipticCurveLib.CurvePoint(u256), out: *const []u8, testnet: bool) usize {
     var serializedPoint: [33]u8 = undefined;
-    serializePoint(pubkey, true, &serializedPoint);
+    pubkey.serialize(true, &serializedPoint);
     var sha256_1: [33]u8 = undefined;
     sha256_1[32] = 0x00;
     Sha256.hash(&serializedPoint, sha256_1[0..32], .{});
@@ -287,67 +86,109 @@ pub fn btcAddress(pubkey: CurvePoint, out: *const []u8, testnet: bool) usize {
     std.mem.copyForwards(u8, &checksum, sha256_3[0..4]);
     const address = hash160 ++ checksum;
     const start = Base58.encode(&address, out.*[0..]);
+    if (testnet) return start;
     out.*[start - 1] = '1';
     return start - 1;
 }
 
-pub const TxOutput = struct {
-    amount: u64,
-    script_pubkey: []u8,
-};
-pub const TxInput = struct {
-    txid: u256,
-    index: u32,
-    script_sig: []u8,
-    sequence: u64,
-};
 pub const Tx = struct {
     version: u32,
     inputs: []TxInput,
     outputs: []TxOutput,
     locktime: u32,
+
+    pub const TxInput = struct {
+        txid: u256,
+        index: u32,
+        script_sig: []u8,
+        sequence: u32,
+    };
+    pub const TxOutput = struct {
+        amount: u64,
+        script_pubkey: []u8,
+    };
+
+    pub fn serialize(self: *Tx) ![]u8 {
+        var bytes = try std.ArrayList(u8).initCapacity(allocator, 100);
+        defer bytes.deinit();
+        const Aux = struct {
+            pub fn writeVarint(stream: std.io.AnyWriter, value: u32) !void {
+                if (value < 0xfd) {
+                    try stream.writeInt(u8, @intCast(value), .little);
+                } else if (value <= 0xffff) {
+                    try stream.writeByte(0xfd);
+                    try stream.writeInt(u16, @intCast(value), .little);
+                } else if (value < 0xffffff) {
+                    try stream.writeByte(0xfe);
+                    try stream.writeInt(u24, @intCast(value), .little);
+                } else {
+                    try stream.writeByte(0xff);
+                    try stream.writeInt(u32, @intCast(value), .little);
+                }
+            }
+        };
+
+        try bytes.writer().writeInt(u32, self.version, .little);
+        try Aux.writeVarint(bytes.writer().any(), @intCast(self.inputs.len));
+        for (self.inputs) |input| {
+            try bytes.writer().writeInt(u256, input.txid, .little);
+            try bytes.writer().writeInt(u32, input.index, .little);
+            //try bytes.writer().writeVarint(output.script_pubkey.len);
+            try bytes.writer().writeAll(input.script_sig);
+            try bytes.writer().writeInt(u32, input.sequence, .little);
+        }
+
+        try Aux.writeVarint(bytes.writer().any(), @intCast(self.outputs.len));
+        for (self.outputs) |output| {
+            try bytes.writer().writeInt(u64, output.amount, .little);
+            //try bytes.writer().writeVarint(output.script_pubkey.len);
+            try bytes.writer().writeAll(output.script_pubkey);
+        }
+        try bytes.writer().writeInt(u32, self.locktime, .little);
+        return bytes.toOwnedSlice();
+    }
+
+    pub fn parse(data: []u8) !Tx {
+        var cursor = Cursor.init(data);
+        var tx: Tx = undefined;
+
+        tx.version = cursor.readInt(u32);
+
+        tx.inputs = inputs: {
+            const n_inputs = cursor.readVarint();
+            const inputs = try allocator.alloc(TxInput, n_inputs);
+            for (inputs) |*input| {
+                input.txid = cursor.readInt(u256);
+                input.index = cursor.readInt(u32);
+                input.script_sig = script_sig: {
+                    const script_sig = try allocator.alloc(u8, cursor.readVarint());
+                    cursor.readBytes(script_sig);
+                    break :script_sig script_sig;
+                };
+                input.sequence = cursor.readInt(u32);
+            }
+            break :inputs inputs;
+        };
+
+        tx.outputs = outputs: {
+            const n_outputs = cursor.readVarint();
+            const outputs = try allocator.alloc(TxOutput, n_outputs);
+            for (outputs) |*output| {
+                output.amount = cursor.readInt(u64);
+                output.script_pubkey = script_pubkey: {
+                    const script_pubkey = try allocator.alloc(u8, cursor.readVarint());
+                    cursor.readBytes(script_pubkey);
+                    break :script_pubkey script_pubkey;
+                };
+            }
+            break :outputs outputs;
+        };
+
+        tx.locktime = cursor.readInt(u32);
+
+        return tx;
+    }
 };
-
-pub fn parseTx(data: []u8) !Tx {
-    var cursor = Cursor.init(data);
-    var tx: Tx = undefined;
-
-    tx.version = cursor.readInt(u32);
-
-    tx.inputs = inputs: {
-        const n_inputs = cursor.readVarint();
-        const inputs = try allocator.alloc(TxInput, n_inputs);
-        for (inputs) |*input| {
-            input.txid = cursor.readInt(u256);
-            input.index = cursor.readInt(u32);
-            input.script_sig = script_sig: {
-                const script_sig = try allocator.alloc(u8, cursor.readVarint());
-                cursor.readBytes(script_sig);
-                break :script_sig script_sig;
-            };
-            input.sequence = cursor.readInt(u32);
-        }
-        break :inputs inputs;
-    };
-
-    tx.outputs = outputs: {
-        const n_outputs = cursor.readVarint();
-        const outputs = try allocator.alloc(TxOutput, n_outputs);
-        for (outputs) |*output| {
-            output.amount = cursor.readInt(u64);
-            output.script_pubkey = script_pubkey: {
-                const script_pubkey = try allocator.alloc(u8, cursor.readVarint());
-                cursor.readBytes(script_pubkey);
-                break :script_pubkey script_pubkey;
-            };
-        }
-        break :outputs outputs;
-    };
-
-    tx.locktime = cursor.readInt(u8);
-
-    return tx;
-}
 
 pub const Script = struct {
     const Stack = struct {
@@ -388,7 +229,7 @@ pub const Script = struct {
             push(self, std.mem.asBytes(&value));
         }
 
-        const PopError = error{ EmptyStack, Corrupted };
+        // @TODO migrate all code to popSafe
         fn pop(self: *Self) PopError![]u8 {
             if (self.top == 0)
                 return error.EmptyStack;
@@ -402,8 +243,16 @@ pub const Script = struct {
             self.top -= next_byte;
             return ret;
         }
+        const PopError = error{ EmptyStack, Corrupted };
 
-        const PopIntError = PopError || error{NotAnOperableInteger};
+        fn popSafe(self: *Self, out: []u8) PopSafeError!void {
+            const popped = try self.pop();
+            if (popped.len > out.len)
+                return error.OutBufferTooSmall;
+            std.mem.copyForwards(u8, out, popped);
+        }
+        const PopSafeError = PopError || error{OutBufferTooSmall};
+
         fn popInt(self: *Self) PopIntError!Self.Int {
             const data = try self.pop();
             if (data.len > 4) {
@@ -421,6 +270,7 @@ pub const Script = struct {
                 @panic("Not handling this case yet: popping more than 1 but less than 4 bytes");
             }
         }
+        const PopIntError = PopError || error{NotAnOperableInteger};
 
         // Only false when top value is existent AND not true.
         // Zero, negative zero and empty array are all treated as false.
@@ -469,9 +319,11 @@ pub const Script = struct {
         pub const OP_ADD: u8 = 0x93;
         pub const OP_SUB: u8 = 0x94;
         pub const OP_SHA256: u8 = 0xa8;
+        pub const OP_HASH160: u8 = 0xa9;
+        pub const OP_CHECKSIG: u8 = 0xac;
     };
 
-    pub fn run(script: []const u8, stack: *Stack) error{ BadScript, VerifyFailed }!void {
+    pub fn run(script: []const u8, stack: *Stack, transaction: ?*Tx, input_index: ?usize) !void {
         const Op = Opcode;
         var scriptReader = Cursor.init(script);
         while (!scriptReader.ended()) {
@@ -547,6 +399,57 @@ pub const Script = struct {
                     Sha256.hash(value, &value_hash, .{});
                     stack.push(&value_hash);
                 },
+                Op.OP_HASH160 => {
+                    var value: [512]u8 = [_]u8{0} ** 512;
+                    stack.popSafe(&value) catch |err| {
+                        if (err == error.OutBufferTooSmall) unreachable;
+                        return error.BadScript;
+                    };
+                    assert(value[value.len - 1] == 0);
+                    var value_hash: [20]u8 = undefined;
+                    c_ripemd.calc_hash(@ptrCast(&value), &value_hash);
+                    stack.push(&value_hash);
+                },
+                Op.OP_CHECKSIG => {
+                    // @TODO consider OP_CODESEPARATOR and occurrences of sig
+                    if (transaction == null or input_index == null) @panic("Calling checksig without a transaction or index");
+                    const pubkey: []u8 = stack.pop() catch return error.BadScript;
+                    var sig: []u8 = stack.pop() catch return error.BadScript;
+                    const hashtype = sig[sig.len - 1];
+                    sig = sig[0 .. sig.len - 1];
+
+                    const txCopy = txCopy: {
+                        var temp: *Tx = try allocator.create(Tx);
+                        temp.* = transaction.?.*;
+                        temp.outputs = try allocator.dupe(Tx.TxOutput, transaction.?.outputs);
+                        temp.inputs = try allocator.dupe(Tx.TxInput, transaction.?.inputs);
+                        for (0..transaction.?.inputs.len) |i| {
+                            if (i == input_index) {
+                                temp.inputs[i].script_sig = try allocator.dupe(u8, script);
+                            } else {
+                                temp.inputs[i].script_sig = try allocator.alloc(u8, 1);
+                                temp.inputs[i].script_sig[0] = 0x00;
+                            }
+                        }
+                        break :txCopy temp;
+                    };
+                    defer {
+                        for (txCopy.inputs) |in| allocator.free(in.script_sig);
+                        allocator.free(txCopy.inputs);
+                        allocator.free(txCopy.outputs);
+                        allocator.destroy(txCopy);
+                    }
+
+                    const txCopyBytes = try txCopy.serialize();
+                    const to_hash = try std.mem.concat(allocator, u8, &[_][]const u8{ txCopyBytes, &[4]u8{ hashtype, 0, 0, 0 } });
+                    const z = CryptLib.hashAsU256(to_hash);
+                    const pubkey_parsed = EllipticCurveLib.CurvePoint(u256).parse(pubkey, CryptLib.secp256k1_p, CryptLib.G.a, CryptLib.G.b);
+                    if (CryptLib.verify(z, pubkey_parsed, CryptLib.Signature.parse(sig))) {
+                        stack.push(&[1]u8{1});
+                    } else {
+                        stack.push(&[1]u8{0});
+                    }
+                },
                 else => {
                     const msg = std.fmt.allocPrint(allocator, "Opcode {} not implemented\n", .{opcode}) catch @panic("While running a Script, a not implemented Opcode was found");
                     @panic(msg);
@@ -555,64 +458,20 @@ pub const Script = struct {
         }
     }
 
-    pub fn validate(scriptSig: []const u8, scriptPubKey: []const u8) !bool {
+    pub fn validate(scriptSig: []const u8, scriptPubKey: []const u8, transaction: ?*Tx, input_index: ?usize) !bool {
         var stack = try Stack.init(scriptSig.len + scriptPubKey.len); // @TODO is this reasonable?
         defer stack.deinit();
 
-        run(scriptSig, &stack) catch return false;
-        run(scriptPubKey, &stack) catch return false;
+        @This().run(scriptSig, &stack, transaction, input_index) catch return false;
+        @This().run(scriptPubKey, &stack, transaction, input_index) catch return false;
 
         return stack.verify();
     }
 };
 
-//#endregion
-
 //#region TESTS #########################################################################
 
 const expect = std.testing.expect;
-
-test "order of G is indeed n" {
-    try expect(G.muli(secp256k1_n).atInfinity());
-}
-
-test "hash" {
-    const hash_result = hashAsU256("The quick brown fox jumps over the lazy dog");
-    try expect(hash_result == 0xd7a8fbb307d7809469ca9abcb0082e4f8d5651e46d3cdb762d02d0bf37c9e592);
-}
-
-test "signing message" {
-    const keys = generateKeyPair();
-    const z = hashAsU256("my message");
-    const signature: Signature = sign(z, keys.prvk);
-    const valid = verify(z, keys.pubk, signature);
-    try expect(valid);
-}
-
-test "sec serialization and parsing" {
-    const p1 = G.muli(3858);
-
-    var p1_uncompressed: [65]u8 = undefined;
-    serializePoint(p1, false, &p1_uncompressed);
-    const p1_uncompressed_parsed = parsePoint(p1_uncompressed[0..]);
-    try expect(p1_uncompressed_parsed.eq(p1));
-
-    var p1_compressed: [33]u8 = undefined;
-    serializePoint(p1, true, &p1_compressed);
-    const p1_compressed_parsed = parsePoint(p1_compressed[0..]);
-    try expect(p1_compressed_parsed.eq(p1));
-}
-
-test "serialized signature" {
-    const sig: Signature = .{
-        .r = hashAsU256("idk"),
-        .s = hashAsU256("anything"),
-    };
-    var serialized_sig: [72]u8 = undefined;
-    serializeSignature(sig, &serialized_sig);
-    const sig_parsed = parseSignature(&serialized_sig);
-    try expect(sig_parsed.r == sig.r and sig_parsed.s == sig.s);
-}
 
 test "base58 encoding and decoding" {
     const u8_array = [8]u8{ 0x00, 0x00, 0x04, 0x09, 0x0a, 0x0f, 0x1a, 0xff };
@@ -627,7 +486,7 @@ test "base58 encoding and decoding" {
 
 test "btc address" {
     const prvk = 0x5da1cb5b4282e3f5c2314df81a3711fa7f0217401de5f72da0ab4906fab04f4c;
-    const pubk = G.muli(prvk);
+    const pubk = CryptLib.G.muli(prvk);
     var out: [40]u8 = undefined;
     const start = btcAddress(pubk, &out[0..], false);
     try expect(std.mem.eql(u8, out[start..], "1GHqmiofmT3PgrZDf7fcq632xybfg6onG4"));
@@ -651,7 +510,7 @@ test "parse transaction" {
         0x00, 0x00, 0x00, 0x00 // locktime
     };
     // zig fmt: on
-    const transaction = try parseTx(transaction_bytes[0..transaction_bytes.len]);
+    const transaction = try Tx.parse(transaction_bytes[0..transaction_bytes.len]);
     _ = transaction;
 }
 
@@ -665,7 +524,7 @@ test "Basic script" {
     const Op = Script.Opcode;
     const script_pub_key = [_]u8{Op.OP_SHA256} ++ [1]u8{answer_hash.len} ++ answer_hash ++ [_]u8{ Op.OP_EQUAL, Op.OP_VERIFY };
     const script_sig = [_]u8{Op.OP_PUSHDATA1} ++ [1]u8{answer.len} ++ answer.*;
-    try expect(try Script.validate(&script_sig, &script_pub_key));
+    try expect(try Script.validate(&script_sig, &script_pub_key, null, null));
 }
 
 //#endregion

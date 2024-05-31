@@ -1,8 +1,5 @@
 const std = @import("std");
 
-// Although this function looks imperative, note that its job is to
-// declaratively construct a build graph that will be executed by an external
-// runner.
 pub fn build(b: *std.Build) void {
     // Standard target options allows the person running `zig build` to choose
     // what target to build for. Here we do not override the defaults, which
@@ -53,28 +50,23 @@ pub fn build(b: *std.Build) void {
 
     // ------------ TESTS ------------
 
-    const run_exe_unit_tests = b.addRunArtifact(b.addTest(.{
-        .root_source_file = .{ .path = "src/main.zig" },
-        .target = target,
-        .optimize = optimize,
-    }));
-
-    const run_elliptic_curve_unit_tests = b.addRunArtifact(b.addTest(.{
-        .root_source_file = .{ .path = "src/elliptic-curve.zig" },
-        .target = target,
-        .optimize = optimize,
-    }));
-
-    const build_crypt_unit_tests = b.addTest(.{
-        .root_source_file = .{ .path = "src/crypt.zig" },
-        .target = target,
-        .optimize = optimize,
-    });
-    build_crypt_unit_tests.root_module.addIncludePath(.{ .path = ("include") });
-    const run_crypt_unit_tests = b.addRunArtifact(build_crypt_unit_tests);
-
     const test_step = b.step("test", "Run unit tests");
-    test_step.dependOn(&run_exe_unit_tests.step);
-    test_step.dependOn(&run_elliptic_curve_unit_tests.step);
-    test_step.dependOn(&run_crypt_unit_tests.step);
+
+    const files = [_][]const u8{
+        "src/cursor.zig",
+        "src/elliptic-curve.zig",
+        "src/cryptography.zig",
+        "src/bitcoin.zig",
+    };
+
+    for (files) |file| {
+        const t = b.addTest(.{
+            .root_source_file = .{ .path = file },
+            .target = target,
+            .optimize = optimize,
+        });
+        t.root_module.addIncludePath(.{ .path = ("include") });
+        const test_artifact = b.addRunArtifact(t);
+        test_step.dependOn(&test_artifact.step);
+    }
 }

@@ -69,7 +69,8 @@ pub const Base58 = struct {
     }
 };
 
-pub fn btcAddress(pubkey: EllipticCurveLib.CurvePoint(u256), out: *const []u8, testnet: bool) usize {
+/// returns index to start reading the ouput
+pub fn btcAddress(pubkey: EllipticCurveLib.CurvePoint(u256), out: []u8, testnet: bool) usize {
     var serializedPoint: [33]u8 = undefined;
     pubkey.serialize(true, &serializedPoint);
     var sha256_1: [33]u8 = undefined;
@@ -85,9 +86,9 @@ pub fn btcAddress(pubkey: EllipticCurveLib.CurvePoint(u256), out: *const []u8, t
     var checksum: [4]u8 = undefined;
     std.mem.copyForwards(u8, &checksum, sha256_3[0..4]);
     const address = hash160 ++ checksum;
-    const start = Base58.encode(&address, out.*[0..]);
+    const start = Base58.encode(&address, out[0..]);
     if (testnet) return start;
-    out.*[start - 1] = '1';
+    out[start - 1] = '1';
     return start - 1;
 }
 
@@ -95,6 +96,7 @@ pub const Tx = struct {
     version: u32,
     inputs: []TxInput,
     outputs: []TxOutput,
+    witness: ?[][]u8 = null,
     locktime: u32,
 
     pub const TxInput = struct {
@@ -107,6 +109,25 @@ pub const Tx = struct {
         amount: u64,
         script_pubkey: []u8,
     };
+
+    pub fn deinit(self: *const Tx) void {
+        for (self.inputs) |input| {
+            allocator.free(input.script_sig);
+        }
+        allocator.free(self.inputs);
+
+        for (self.outputs) |output| {
+            allocator.free(output.script_pubkey);
+        }
+        allocator.free(self.outputs);
+
+        if (self.witness) |witness| {
+            for (witness) |w| {
+                allocator.free(w);
+            }
+            allocator.free(witness);
+        }
+    }
 
     pub fn serialize(self: *Tx) ![]u8 {
         var bytes = try std.ArrayList(u8).initCapacity(allocator, 100);
@@ -151,11 +172,17 @@ pub const Tx = struct {
     pub fn parse(data: []u8) !Tx {
         var cursor = Cursor.init(data);
         var tx: Tx = undefined;
+        var is_witness = false;
 
         tx.version = cursor.readInt(u32);
 
         tx.inputs = inputs: {
-            const n_inputs = cursor.readVarint();
+            var n_inputs = cursor.readVarint();
+            if (n_inputs == 0) { // witness marker
+                is_witness = true;
+                assert(cursor.readInt(u8) == 1); // witness flag
+                n_inputs = cursor.readVarint();
+            }
             const inputs = try allocator.alloc(TxInput, n_inputs);
             for (inputs) |*input| {
                 input.txid = cursor.readInt(u256);
@@ -182,6 +209,18 @@ pub const Tx = struct {
                 };
             }
             break :outputs outputs;
+        };
+
+        tx.witness = witness: {
+            if (!is_witness) break :witness null;
+
+            const n_items = cursor.readVarint();
+            const temp_witness = try allocator.alloc([]u8, n_items);
+            for (0..n_items) |i| {
+                temp_witness[i] = try allocator.alloc(u8, cursor.readVarint());
+                cursor.readBytes(temp_witness[i]);
+            }
+            break :witness temp_witness;
         };
 
         tx.locktime = cursor.readInt(u32);
@@ -433,12 +472,7 @@ pub const Script = struct {
                         }
                         break :txCopy temp;
                     };
-                    defer {
-                        for (txCopy.inputs) |in| allocator.free(in.script_sig);
-                        allocator.free(txCopy.inputs);
-                        allocator.free(txCopy.outputs);
-                        allocator.destroy(txCopy);
-                    }
+                    defer txCopy.deinit();
 
                     const txCopyBytes = try txCopy.serialize();
                     const to_hash = try std.mem.concat(allocator, u8, &[_][]const u8{ txCopyBytes, &[4]u8{ hashtype, 0, 0, 0 } });
@@ -488,11 +522,11 @@ test "btc address" {
     const prvk = 0x5da1cb5b4282e3f5c2314df81a3711fa7f0217401de5f72da0ab4906fab04f4c;
     const pubk = CryptLib.G.muli(prvk);
     var out: [40]u8 = undefined;
-    const start = btcAddress(pubk, &out[0..], false);
+    const start = btcAddress(pubk, out[0..], false);
     try expect(std.mem.eql(u8, out[start..], "1GHqmiofmT3PgrZDf7fcq632xybfg6onG4"));
 }
 
-test "parse transaction" {
+test "parse p2pkh transaction" {
     // zig fmt: off
     var transaction_bytes = [_]u8{
         0x01, 0x00, 0x00, 0x00, // version (constant)
@@ -511,7 +545,35 @@ test "parse transaction" {
     };
     // zig fmt: on
     const transaction = try Tx.parse(transaction_bytes[0..transaction_bytes.len]);
-    _ = transaction;
+    defer transaction.deinit();
+}
+
+test "parse p2wpkh transaction" {
+    // zig fmt: off
+    var transaction_bytes = [_]u8{
+        0x02, 0x00, 0x00, 0x00,
+        0x00, 0x01, // witness marker and flag
+        0x01,
+            0x28, 0xae, 0x67, 0x25, 0x22, 0x1f, 0xc3, 0x11, 0x91, 0x26, 0x09, 0xd2, 0xc3, 0x43, 0x50, 0x0f, 0x63, 0x35, 0x10, 0x65, 0xab, 0x59, 0xca, 0xf5, 0xc3, 0x16, 0x38, 0x66, 0x21, 0x77, 0xea, 0xdc,
+            0x01, 0x00, 0x00, 0x00,
+            0x00,
+            0xfd, 0xff, 0xff, 0xff,
+        0x02,
+            0x19, 0xcf, 0x0b, 0x44, 0x3a, 0x00, 0x00, 0x00,
+            0x22,   0x51, 0x20, 0xaa, 0xc3, 0x5f, 0xe9, 0x1f, 0x20, 0xd4, 0x88, 0x16, 0xb3, 0xc8, 0x30, 0x11, 0xd1, 0x17, 0xef, 0xa3, 0x5a, 0xcd, 0x24, 0x14, 0xd3, 0x6c, 0x1e, 0x02, 0xb0, 0xf2, 0x9f, 0xc3, 0x10, 0x6d, 0x90,
+
+            0x80, 0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x16,   0x00, 0x14, 0xbf, 0x9d, 0x74, 0xa5, 0x0e, 0x3b, 0x9c, 0x9a, 0xca, 0x37, 0x08, 0xca, 0x95, 0x14, 0x19, 0xbb, 0xd6, 0xfa, 0x32, 0x63,
+        // witness
+        0x01, 0x40, 0x66, 0xbb, 0xff, 0xd4, 0xda, 0xfd, 0x01, 0x72, 0x83, 0xa7, 0x13, 0x2e, 0xff, 0x9f, 0x70, 0xf1, 0xec, 0xbc, 0x5c, 0x66, 0x38, 0xc3, 0x1b, 0x75, 0x6e, 0x61, 0xa6, 0xa6, 0x3e, 0x07, 0x2f, 0xe6, 0xf5, 0x4a, 0xc4, 0xfd, 0x69, 0xa4, 0x06, 0x10, 0xdf, 0x05, 0xef, 0xbf, 0x08, 0xa7, 0x3b, 0xb5, 0x85, 0x22, 0x7c, 0xd7, 0x5d, 0x99, 0xb5, 0xa8, 0xd3, 0x54, 0x1b, 0xc1, 0x04, 0xe5, 0x10, 0x50,
+        0x00, 0x00, 0x00, 0x00 // locktime
+    };
+    // zig fmt: on
+    const transaction = try Tx.parse(transaction_bytes[0..transaction_bytes.len]);
+    defer transaction.deinit();
+    try expect(transaction.inputs.len == 1);
+    try expect(transaction.outputs.len == 2);
+    try expect(transaction.outputs[1].amount == 6272);
 }
 
 test "Basic script" {

@@ -115,13 +115,15 @@ pub fn main() !void {
         pubk.serialize(true, &serialized_pubk);
         print("pubkey (SEC compressed): {x}\n", .{serialized_pubk});
         var address: [40]u8 = undefined;
-        const start = Bitcoin.btcAddress(pubk, &address[0..], testnet);
+        const start = Bitcoin.btcAddress(pubk, address[0..], testnet);
         print("address: {s}\n", .{address[start..]});
     }
 
     print("\n------------------- Transactions -------------------\n", .{});
     {
-        // zig fmt: off
+        print("-----> Serialization\n", .{});
+        {
+            // zig fmt: off
             var transaction_bytes = [_]u8{
                 0x01, 0x00, 0x00, 0x00, // version (constant)
                 0x01, // number of inputs
@@ -138,26 +140,69 @@ pub fn main() !void {
                 0x00, 0x00, 0x00, 0x00 // locktime
             };
             // zig fmt: on
-        const transaction = try Bitcoin.Tx.parse(transaction_bytes[0..transaction_bytes.len]);
-        print("transaction: {any}\n", .{transaction});
-    }
+            const transaction = try Bitcoin.Tx.parse(transaction_bytes[0..transaction_bytes.len]);
+            defer transaction.deinit();
+            print("{any}\n", .{transaction});
+        }
 
-    print("\n------------------- Script -------------------\n", .{});
-    {
-        const answer = "And he answering said, Thou shalt love the Lord thy God with all thy heart, and with all thy soul, and with all thy strength, and with all thy mind; and thy neighbour as thyself.";
-        print("answer: \"{s}\"\n", .{answer});
-        const answer_hash = answer_hash: {
-            var buf: [32]u8 = undefined;
-            std.crypto.hash.sha2.Sha256.hash(answer, &buf, .{});
-            break :answer_hash buf;
-        };
-        print("h(answer): {x}\n", .{answer_hash});
-        const Op = Bitcoin.Script.Opcode;
-        const script_pub_key = [_]u8{Op.OP_SHA256} ++ [1]u8{answer_hash.len} ++ answer_hash ++ [_]u8{ Op.OP_EQUAL, Op.OP_VERIFY };
-        print("script_pub_key: {x}\n", .{script_pub_key});
-        const script_sig = [_]u8{Op.OP_PUSHDATA1} ++ [1]u8{answer.len} ++ answer.*;
-        print("script_sig: {x}\n", .{script_sig});
-        const valid = Bitcoin.Script.validate(&script_sig, &script_pub_key, null, null);
-        print("valid: {any}\n", .{valid});
+        print("-----> Serialization 2 (a real transaction on https://mempool.space/signet/tx/bd9d8ea4a30d9465159f199c48acda11441d8bcd66020ad55a1215015431bb18)\n", .{});
+        {
+            // zig fmt: off
+            var transaction_bytes = [_]u8{
+                0x02, 0x00, 0x00, 0x00,
+                0x00, 0x01, // witness marker and flag
+                0x01,
+                    0x28, 0xae, 0x67, 0x25, 0x22, 0x1f, 0xc3, 0x11, 0x91, 0x26, 0x09, 0xd2, 0xc3, 0x43, 0x50, 0x0f, 0x63, 0x35, 0x10, 0x65, 0xab, 0x59, 0xca, 0xf5, 0xc3, 0x16, 0x38, 0x66, 0x21, 0x77, 0xea, 0xdc,
+                    0x01, 0x00, 0x00, 0x00,
+                    0x00,
+                    0xfd, 0xff, 0xff, 0xff,
+                0x02,
+                    0x19, 0xcf, 0x0b, 0x44, 0x3a, 0x00, 0x00, 0x00,
+                    0x22,   0x51, 0x20, 0xaa, 0xc3, 0x5f, 0xe9, 0x1f, 0x20, 0xd4, 0x88, 0x16, 0xb3, 0xc8, 0x30, 0x11, 0xd1, 0x17, 0xef, 0xa3, 0x5a, 0xcd, 0x24, 0x14, 0xd3, 0x6c, 0x1e, 0x02, 0xb0, 0xf2, 0x9f, 0xc3, 0x10, 0x6d, 0x90,
+
+                    0x80, 0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                    0x16,   0x00, 0x14, 0xbf, 0x9d, 0x74, 0xa5, 0x0e, 0x3b, 0x9c, 0x9a, 0xca, 0x37, 0x08, 0xca, 0x95, 0x14, 0x19, 0xbb, 0xd6, 0xfa, 0x32, 0x63,
+                // witness
+                0x01, 0x40, 0x66, 0xbb, 0xff, 0xd4, 0xda, 0xfd, 0x01, 0x72, 0x83, 0xa7, 0x13, 0x2e, 0xff, 0x9f, 0x70, 0xf1, 0xec, 0xbc, 0x5c, 0x66, 0x38, 0xc3, 0x1b, 0x75, 0x6e, 0x61, 0xa6, 0xa6, 0x3e, 0x07, 0x2f, 0xe6, 0xf5, 0x4a, 0xc4, 0xfd, 0x69, 0xa4, 0x06, 0x10, 0xdf, 0x05, 0xef, 0xbf, 0x08, 0xa7, 0x3b, 0xb5, 0x85, 0x22, 0x7c, 0xd7, 0x5d, 0x99, 0xb5, 0xa8, 0xd3, 0x54, 0x1b, 0xc1, 0x04, 0xe5, 0x10, 0x50,
+                0x00, 0x00, 0x00, 0x00 // locktime
+            };
+            // zig fmt: on
+            const transaction = try Bitcoin.Tx.parse(transaction_bytes[0..transaction_bytes.len]);
+            defer transaction.deinit();
+            print("{any}\n", .{transaction});
+        }
+
+        print("-----> Script\n", .{});
+        {
+            const answer = "And he answering said, Thou shalt love the Lord thy God with all thy heart, and with all thy soul, and with all thy strength, and with all thy mind; and thy neighbour as thyself.";
+            print("answer: \"{s}\"\n", .{answer});
+            const answer_hash = answer_hash: {
+                var buf: [32]u8 = undefined;
+                std.crypto.hash.sha2.Sha256.hash(answer, &buf, .{});
+                break :answer_hash buf;
+            };
+            const Op = Bitcoin.Script.Opcode;
+            const script_pub_key = [_]u8{Op.OP_SHA256} ++ [1]u8{answer_hash.len} ++ answer_hash ++ [_]u8{ Op.OP_EQUAL, Op.OP_VERIFY };
+            print("script_pub_key: OP_SHA256, <Sha256(answer)>, OP_EQUAL, OP_VERIFY\n", .{});
+            print("script_pub_key in hex: {x}\n", .{script_pub_key});
+            const script_sig = [_]u8{Op.OP_PUSHDATA1} ++ [1]u8{answer.len} ++ answer.*;
+            print("script_sig: OP_PUSHDATA1, <answer>\n", .{});
+            print("script_sig in hex: {x}\n", .{script_sig});
+            const valid = Bitcoin.Script.validate(&script_sig, &script_pub_key, null, null);
+            print("valid: {any}\n", .{valid});
+        }
+
+        //        print("\n-----> Signing a transaction\n", .{});
+        //        const prvk = 0xf45e6907b16670196e487cf667e9fa510f0593276335da22311eb67c90d46421;
+        //        const pubk = CryptLib.G.muli(prvk);
+        //        const txin = Bitcoin.Tx.TxInput {
+        //            .txid = 0xbd9d8ea4a30d9465159f199c48acda11441d8bcd66020ad55a1215015431bb18,
+        //            .index = 1,
+        //            .script_sig = &[_]u8{},
+        //            .sequence = 0xffffffff,
+        //        };
+        //        const txout = Bitcoin.Tx.TxOutput{};
+        //        const tx = Bitcoin.Tx{};
+        //        print();
     }
 }

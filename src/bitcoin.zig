@@ -69,23 +69,30 @@ pub const Base58 = struct {
     }
 };
 
-/// returns index to start reading the ouput
-pub fn btcAddress(pubkey: EllipticCurveLib.CurvePoint(u256), out: []u8, testnet: bool) usize {
-    var serializedPoint: [33]u8 = undefined;
-    pubkey.serialize(true, &serializedPoint);
+pub fn hash160(bytes: []const u8, out: []u8) void {
     var sha256_1: [33]u8 = undefined;
     sha256_1[32] = 0x00;
-    Sha256.hash(&serializedPoint, sha256_1[0..32], .{});
-    var hash160: [21]u8 = undefined;
-    c_ripemd.calc_hash(&sha256_1, hash160[1..]);
-    hash160[0] = if (testnet) 0x6f else 0x00;
+    Sha256.hash(bytes, sha256_1[0..32], .{});
+    c_ripemd.calc_hash(&sha256_1, @ptrCast(out));
+}
+
+/// returns index to start reading the ouput
+pub fn btcAddress(pubkey: EllipticCurveLib.CurvePoint(u256), out: []u8, testnet: bool) usize {
+    var hash160_data: [21]u8 = undefined;
+    {
+        var serializedPoint: [33]u8 = undefined;
+        pubkey.serialize(true, &serializedPoint);
+        hash160(&serializedPoint, hash160_data[1..]);
+    }
+
+    hash160_data[0] = if (testnet) 0x6f else 0x00;
     var sha256_2: [32]u8 = undefined;
-    Sha256.hash(&hash160, &sha256_2, .{});
+    Sha256.hash(&hash160_data, &sha256_2, .{});
     var sha256_3: [32]u8 = undefined;
     Sha256.hash(&sha256_2, &sha256_3, .{});
     var checksum: [4]u8 = undefined;
     std.mem.copyForwards(u8, &checksum, sha256_3[0..4]);
-    const address = hash160 ++ checksum;
+    const address = hash160_data ++ checksum;
     const start = Base58.encode(&address, out[0..]);
     if (testnet) return start;
     out[start - 1] = '1';
@@ -102,12 +109,12 @@ pub const Tx = struct {
     pub const TxInput = struct {
         txid: u256,
         index: u32,
-        script_sig: []u8,
+        script_sig: []const u8,
         sequence: u32,
     };
     pub const TxOutput = struct {
         amount: u64,
-        script_pubkey: []u8,
+        script_pubkey: []const u8,
     };
 
     pub fn deinit(self: *const Tx) void {
@@ -129,7 +136,63 @@ pub const Tx = struct {
         }
     }
 
-    pub fn serialize(self: *Tx) ![]u8 {
+    pub fn hashForSigning(self: *Tx, input_index: usize, hashtype: u8, prev_script_pubkey: []const u8) !u256 {
+        var empty_script = [1]u8{0};
+        const tx_copy = tx_copy: {
+            var temp: *Tx = try allocator.create(Tx);
+            temp.* = self.*;
+            temp.outputs = try allocator.dupe(Tx.TxOutput, self.outputs);
+            temp.inputs = try allocator.dupe(Tx.TxInput, self.inputs);
+            for (0..self.inputs.len) |i| {
+                if (i == input_index) {
+                    temp.inputs[i].script_sig = try allocator.dupe(u8, prev_script_pubkey);
+                } else {
+                    temp.inputs[i].script_sig = try allocator.dupe(u8, &empty_script);
+                }
+            }
+            break :tx_copy temp;
+        };
+        defer {
+            for (tx_copy.inputs) |input| allocator.free(input.script_sig);
+            allocator.free(tx_copy.outputs);
+            allocator.free(tx_copy.inputs);
+            allocator.destroy(tx_copy);
+        }
+
+        const tx_copy_bytes = try tx_copy.serialize();
+        const tx_copy_with_hashtype = try std.mem.concat(allocator, u8, &[_][]const u8{ tx_copy_bytes, &[4]u8{ hashtype, 0, 0, 0 } });
+        return CryptLib.hashAsU256(tx_copy_with_hashtype);
+    }
+
+    pub fn sign(self: *Tx, privkey: u256, input_index: usize, prev_script_pubkey: []const u8) !void {
+        // @TODO implement at least first condition in https://github.com/bitcoin/bips/blob/master/bip-0141.mediawiki#witness-program
+        const hashtype = 0x01;
+        const z = try self.hashForSigning(input_index, hashtype, prev_script_pubkey);
+
+        allocator.free(self.inputs[input_index].script_sig);
+        self.inputs[input_index].script_sig = resulting_script_sig: {
+            const resulting_script_sig_len = 1 + 73 + 1 + 33;
+            var resulting_script_sig = try allocator.alloc(u8, resulting_script_sig_len);
+            resulting_script_sig[0] = 73;
+            CryptLib.sign(z, privkey).serialize(resulting_script_sig[1..73]);
+            resulting_script_sig[73] = hashtype;
+
+            resulting_script_sig[74] = 33;
+            CryptLib.G.muli(privkey).serialize(true, resulting_script_sig[75..][0..33]);
+            break :resulting_script_sig resulting_script_sig;
+        };
+    }
+
+    pub fn checksig(transaction: *Tx, input_index: usize, pubkey: []const u8, signature: []const u8, script: []const u8) !bool {
+        const hashtype = signature[signature.len - 1];
+        const sig = signature[0 .. signature.len - 1];
+
+        const z = try transaction.hashForSigning(input_index, hashtype, script);
+        const pubkey_parsed = EllipticCurveLib.CurvePoint(u256).parse(pubkey, CryptLib.secp256k1_p, CryptLib.G.a, CryptLib.G.b);
+        return CryptLib.verify(z, pubkey_parsed, CryptLib.Signature.parse(sig));
+    }
+
+    pub fn serialize(self: *const Tx) ![]u8 {
         var bytes = try std.ArrayList(u8).initCapacity(allocator, 100);
         defer bytes.deinit();
         const Aux = struct {
@@ -150,11 +213,12 @@ pub const Tx = struct {
         };
 
         try bytes.writer().writeInt(u32, self.version, .little);
+
         try Aux.writeVarint(bytes.writer().any(), @intCast(self.inputs.len));
         for (self.inputs) |input| {
             try bytes.writer().writeInt(u256, input.txid, .little);
             try bytes.writer().writeInt(u32, input.index, .little);
-            //try bytes.writer().writeVarint(output.script_pubkey.len);
+            try Aux.writeVarint(bytes.writer().any(), @intCast(input.script_sig.len));
             try bytes.writer().writeAll(input.script_sig);
             try bytes.writer().writeInt(u32, input.sequence, .little);
         }
@@ -162,9 +226,10 @@ pub const Tx = struct {
         try Aux.writeVarint(bytes.writer().any(), @intCast(self.outputs.len));
         for (self.outputs) |output| {
             try bytes.writer().writeInt(u64, output.amount, .little);
-            //try bytes.writer().writeVarint(output.script_pubkey.len);
+            try Aux.writeVarint(bytes.writer().any(), @intCast(output.script_pubkey.len));
             try bytes.writer().writeAll(output.script_pubkey);
         }
+
         try bytes.writer().writeInt(u32, self.locktime, .little);
         return bytes.toOwnedSlice();
     }
@@ -284,11 +349,12 @@ pub const Script = struct {
         }
         const PopError = error{ EmptyStack, Corrupted };
 
-        fn popSafe(self: *Self, out: []u8) PopSafeError!void {
+        fn popSafe(self: *Self, buffer: []u8) PopSafeError![]u8 {
             const popped = try self.pop();
-            if (popped.len > out.len)
+            if (popped.len > buffer.len)
                 return error.OutBufferTooSmall;
-            std.mem.copyForwards(u8, out, popped);
+            std.mem.copyForwards(u8, buffer, popped);
+            return buffer[0..popped.len];
         }
         const PopSafeError = PopError || error{OutBufferTooSmall};
 
@@ -439,46 +505,21 @@ pub const Script = struct {
                     stack.push(&value_hash);
                 },
                 Op.OP_HASH160 => {
-                    var value: [512]u8 = [_]u8{0} ** 512;
-                    stack.popSafe(&value) catch |err| {
-                        if (err == error.OutBufferTooSmall) unreachable;
+                    var buffer: [512]u8 = [_]u8{0} ** 512;
+                    const value = stack.popSafe(&buffer) catch |err| {
+                        if (err == error.OutBufferTooSmall) @panic("Not handling HASH160 for stack items larger than 512 bytes");
                         return error.BadScript;
                     };
-                    assert(value[value.len - 1] == 0);
-                    var value_hash: [20]u8 = undefined;
-                    c_ripemd.calc_hash(@ptrCast(&value), &value_hash);
-                    stack.push(&value_hash);
+                    var hash160_data: [20]u8 = undefined;
+                    hash160(value, &hash160_data);
+                    stack.push(&hash160_data);
                 },
                 Op.OP_CHECKSIG => {
-                    // @TODO consider OP_CODESEPARATOR and occurrences of sig
-                    if (transaction == null or input_index == null) @panic("Calling checksig without a transaction or index");
+                    if (transaction == null) @panic("Trying to execute OP_CHECKSIG with a null transaction");
+                    if (input_index == null) @panic("Trying to execute OP_CHECKSIG with a null input_index");
                     const pubkey: []u8 = stack.pop() catch return error.BadScript;
-                    var sig: []u8 = stack.pop() catch return error.BadScript;
-                    const hashtype = sig[sig.len - 1];
-                    sig = sig[0 .. sig.len - 1];
-
-                    const txCopy = txCopy: {
-                        var temp: *Tx = try allocator.create(Tx);
-                        temp.* = transaction.?.*;
-                        temp.outputs = try allocator.dupe(Tx.TxOutput, transaction.?.outputs);
-                        temp.inputs = try allocator.dupe(Tx.TxInput, transaction.?.inputs);
-                        for (0..transaction.?.inputs.len) |i| {
-                            if (i == input_index) {
-                                temp.inputs[i].script_sig = try allocator.dupe(u8, script);
-                            } else {
-                                temp.inputs[i].script_sig = try allocator.alloc(u8, 1);
-                                temp.inputs[i].script_sig[0] = 0x00;
-                            }
-                        }
-                        break :txCopy temp;
-                    };
-                    defer txCopy.deinit();
-
-                    const txCopyBytes = try txCopy.serialize();
-                    const to_hash = try std.mem.concat(allocator, u8, &[_][]const u8{ txCopyBytes, &[4]u8{ hashtype, 0, 0, 0 } });
-                    const z = CryptLib.hashAsU256(to_hash);
-                    const pubkey_parsed = EllipticCurveLib.CurvePoint(u256).parse(pubkey, CryptLib.secp256k1_p, CryptLib.G.a, CryptLib.G.b);
-                    if (CryptLib.verify(z, pubkey_parsed, CryptLib.Signature.parse(sig))) {
+                    const signature: []u8 = stack.pop() catch return error.BadScript;
+                    if (try Tx.checksig(transaction.?, input_index.?, pubkey, signature, script)) {
                         stack.push(&[1]u8{1});
                     } else {
                         stack.push(&[1]u8{0});
@@ -526,7 +567,7 @@ test "btc address" {
     try expect(std.mem.eql(u8, out[start..], "1GHqmiofmT3PgrZDf7fcq632xybfg6onG4"));
 }
 
-test "parse p2pkh transaction" {
+test "parse and serialize p2pkh transaction" {
     // zig fmt: off
     var transaction_bytes = [_]u8{
         0x01, 0x00, 0x00, 0x00, // version (constant)
@@ -546,6 +587,8 @@ test "parse p2pkh transaction" {
     // zig fmt: on
     const transaction = try Tx.parse(transaction_bytes[0..transaction_bytes.len]);
     defer transaction.deinit();
+
+    try std.testing.expectEqualSlices(u8, transaction_bytes[0..transaction_bytes.len], try transaction.serialize());
 }
 
 test "parse p2wpkh transaction" {
@@ -587,6 +630,75 @@ test "Basic script" {
     const script_pub_key = [_]u8{Op.OP_SHA256} ++ [1]u8{answer_hash.len} ++ answer_hash ++ [_]u8{ Op.OP_EQUAL, Op.OP_VERIFY };
     const script_sig = [_]u8{Op.OP_PUSHDATA1} ++ [1]u8{answer.len} ++ answer.*;
     try expect(try Script.validate(&script_sig, &script_pub_key, null, null));
+}
+
+test "transaction signing and checksig" {
+    const prvk = 0xf45e6907b16670196e487cf667e9fa510f0593276335da22311eb67c90d46421;
+    const pubk = CryptLib.G.muli(prvk);
+    var pubk_serialized: [33]u8 = undefined;
+    pubk.serialize(true, &pubk_serialized);
+    //const faucetAddress = "tb1p4tp4l6glyr2gs94neqcpr5gha7344nfyznfkc8szkreflscsdkgqsdent4"; // I don't understand this address yet (Taproot or something)
+    const faucetPubKeyScript = [_]u8{ 0x51, 0x20, 0xaa, 0xc3, 0x5f, 0xe9, 0x1f, 0x20, 0xd4, 0x88, 0x16, 0xb3, 0xc8, 0x30, 0x11, 0xd1, 0x17, 0xef, 0xa3, 0x5a, 0xcd, 0x24, 0x14, 0xd3, 0x6c, 0x1e, 0x02, 0xb0, 0xf2, 0x9f, 0xc3, 0x10, 0x6d, 0x90 };
+    const prev_txid = 0xbd9d8ea4a30d9465159f199c48acda11441d8bcd66020ad55a1215015431bb18;
+    const prev_script_pubkey = [_]u8{ 0x00, 0x14, 0xbf, 0x9d, 0x74, 0xa5, 0x0e, 0x3b, 0x9c, 0x9a, 0xca, 0x37, 0x08, 0xca, 0x95, 0x14, 0x19, 0xbb, 0xd6, 0xfa, 0x32, 0x63 };
+
+    var transaction = Tx{
+        .version = 1,
+        .inputs = try std.heap.page_allocator.dupe(Tx.TxInput, &inputs: {
+            break :inputs [_]Tx.TxInput{
+                Tx.TxInput{
+                    .txid = prev_txid,
+                    .index = 1,
+                    .script_sig = &[_]u8{},
+                    .sequence = 0xffffffff,
+                },
+            };
+        }),
+        .outputs = try std.heap.page_allocator.dupe(Tx.TxOutput, &outputs: {
+            var outputs = [_]Tx.TxOutput{
+                Tx.TxOutput{
+                    .amount = 600,
+                    .script_pubkey = try std.heap.page_allocator.dupe(u8, &faucetPubKeyScript),
+                },
+                Tx.TxOutput{
+                    .amount = 5000,
+                    .script_pubkey = script_pubkey: {
+                        // @TODO refactor this
+                        var script_pubkey: []u8 = try std.heap.page_allocator.alloc(u8, 25);
+                        const Op = Script.Opcode;
+                        script_pubkey[0] = Op.OP_DUP;
+                        script_pubkey[1] = Op.OP_HASH160;
+                        script_pubkey[2] = 0x14;
+                        hash160(&pubk_serialized, script_pubkey[3..23]);
+                        script_pubkey[23] = Op.OP_EQUALVERIFY;
+                        script_pubkey[24] = Op.OP_CHECKSIG;
+                        break :script_pubkey script_pubkey;
+                    },
+                },
+            };
+            break :outputs outputs;
+        }),
+        .locktime = 0,
+    };
+    defer transaction.deinit();
+
+    try transaction.sign(prvk, 0, &prev_script_pubkey);
+
+    const serialized = try transaction.serialize();
+    try std.testing.expectEqualSlices(
+        u8,
+        &[_]u8{ 0x01, 0x00, 0x00, 0x00, 0x01, 0x18, 0xbb, 0x31, 0x54, 0x01, 0x15, 0x12, 0x5a, 0xd5, 0x0a, 0x02, 0x66, 0xcd, 0x8b, 0x1d, 0x44, 0x11, 0xda, 0xac, 0x48, 0x9c, 0x19, 0x9f, 0x15, 0x65, 0x94, 0x0d, 0xa3, 0xa4, 0x8e, 0x9d, 0xbd, 0x01, 0x00, 0x00, 0x00, 0x6c, 0x49, 0x30, 0x46, 0x02, 0x21, 0x00 },
+        serialized[0..48],
+    );
+
+    const checksig = try Tx.checksig(
+        &transaction,
+        0,
+        &pubk_serialized,
+        transaction.inputs[0].script_sig[1..74],
+        &prev_script_pubkey,
+    );
+    try expect(checksig == true);
 }
 
 //#endregion

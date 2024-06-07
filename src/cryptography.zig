@@ -29,20 +29,41 @@ pub const Signature = struct {
     s: u256,
 
     pub fn serialize(self: *const Signature, out: *[72]u8) void {
-        const bytes_0_to_5 = [_]u8{ 0x30, 0x46, 0x02, 0x21, 0x00 };
-        std.mem.copyForwards(u8, out[0..5], &bytes_0_to_5);
+        // @TODO can save two bytes when padding not needed
+        std.mem.copyForwards(u8, out[0..5], &.{ 0x30, 0x46, 0x02, 0x21, 0x00 });
         std.mem.writeInt(u256, out[5..37], self.r, .big);
-        const bytes_37_to_39 = [_]u8{ 0x02, 0x21 };
-        std.mem.copyForwards(u8, out[37..39], &bytes_37_to_39);
-        std.mem.writeInt(u256, out[39..71], self.s, .big);
+        std.mem.copyForwards(u8, out[37..40], &.{ 0x02, 0x21, 0x00 });
+        std.mem.writeInt(u256, out[40..72], self.s, .big);
     }
 
     pub fn parse(bytes: []const u8) Signature {
-        assert(bytes.len == 72);
-        assert(bytes[0] == 0x30 and bytes[1] == 0x46);
+        assert(bytes[0] == 0x30);
+        assert(bytes.len == 2 + bytes[1]);
+        assert(bytes[2] == 0x02);
+        const r_len = bytes[3];
+        assert(4 + r_len < bytes.len);
+        assert(bytes[4 + r_len] == 0x02);
+        const s_len_index = 4 + r_len + 1;
+        assert(s_len_index < bytes.len);
+        const s_len = bytes[4 + r_len + 1];
+        assert(s_len_index + s_len == bytes.len - 1);
+        assert(r_len == 32 or r_len == 33);
+        assert(s_len == 32 or s_len == 33);
+
+        var r_buffer: [32]u8 = .{0} ** 32;
+        {
+            const r_first_index: usize = if (r_len == 33) 5 else 4;
+            for (&r_buffer, bytes[r_first_index..][0..32]) |*d, s| d.* = s;
+        }
+        var s_buffer: [32]u8 = .{0} ** 32;
+        {
+            const s_first_index: usize = if (s_len == 33) s_len_index + 2 else s_len_index + 1;
+            for (&s_buffer, bytes[s_first_index..][0..32]) |*d, s| d.* = s;
+        }
+
         return .{
-            .r = std.mem.readInt(u256, bytes[5..37], .big),
-            .s = std.mem.readInt(u256, bytes[39..71], .big),
+            .r = std.mem.readInt(u256, &r_buffer, .big),
+            .s = std.mem.readInt(u256, &s_buffer, .big),
         };
     }
 };
@@ -125,7 +146,16 @@ test "serialized signature" {
     var serialized_sig: [72]u8 = undefined;
     sig.serialize(&serialized_sig);
     const sig_parsed = Signature.parse(&serialized_sig);
-    try expect(sig_parsed.r == sig.r and sig_parsed.s == sig.s);
+    try std.testing.expectEqualDeep(sig, sig_parsed);
+
+    const sig2 = Signature.parse(&.{ 0x30, 0x44, 0x02, 0x20, 0x39, 0x43, 0x58, 0x0d, 0x54, 0x54, 0x70, 0xe1, 0x9b, 0xd9, 0xc7, 0x92, 0x4e, 0x08, 0x11, 0xc3, 0x34, 0x83, 0x16, 0xa7, 0xef, 0x12, 0x9b, 0xcb, 0x6b, 0xe1, 0xab, 0x03, 0x88, 0x76, 0x95, 0x98, 0x02, 0x20, 0x41, 0xe6, 0x3a, 0xb6, 0x08, 0x7b, 0x79, 0x20, 0x70, 0x59, 0x26, 0xf6, 0xb9, 0x50, 0x04, 0xd0, 0x8e, 0x01, 0xc1, 0xf8, 0x16, 0x38, 0xca, 0x71, 0x53, 0x97, 0xa7, 0xf0, 0x81, 0x6e, 0xc8, 0x87 });
+    try std.testing.expectEqualDeep(
+        Signature{
+            .r = 25900818835625129619026014211686450729698931365216873087254722392658963502488,
+            .s = 29807115191703043155797809226099545662063525568305845350204007208552481343623,
+        },
+        sig2,
+    );
 }
 
 //#endregion

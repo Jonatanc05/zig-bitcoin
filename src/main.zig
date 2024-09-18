@@ -1,5 +1,6 @@
 const std = @import("std");
 const print = std.debug.print;
+const Sha256 = std.crypto.hash.sha2.Sha256;
 
 const EllipticCurveLib = @import("elliptic-curve.zig");
 const fe = EllipticCurveLib.FieldElement(u256).fieldElementShortcut;
@@ -9,6 +10,8 @@ const Bitcoin = @import("bitcoin.zig");
 const CryptLib = @import("cryptography.zig");
 
 pub fn main() !void {
+    const privkey: u256 = try std.fmt.parseInt(u256, @embedFile(".privkey")[0..64], 16);
+
     print("\n------------- FiniteFields -------------\n", .{});
     {
         EllipticCurveLib.FieldElement(u256).setGlobalPrime(13);
@@ -121,7 +124,7 @@ pub fn main() !void {
 
     print("\n------------------- Transactions -------------------\n", .{});
     {
-        print("-----> Serialization\n", .{});
+        print("\n-----> Serialization\n", .{});
         {
             // zig fmt: off
             var transaction_bytes = [_]u8{
@@ -145,7 +148,7 @@ pub fn main() !void {
             print("{any}\n", .{transaction});
         }
 
-        print("-----> Serialization 2 (a real transaction on https://mempool.space/signet/tx/bd9d8ea4a30d9465159f199c48acda11441d8bcd66020ad55a1215015431bb18)\n", .{});
+        print("\n-----> Serialization 2 (a real transaction on https://mempool.space/signet/tx/bd9d8ea4a30d9465159f199c48acda11441d8bcd66020ad55a1215015431bb18)\n", .{});
         {
             // zig fmt: off
             var transaction_bytes = [_]u8{
@@ -172,7 +175,7 @@ pub fn main() !void {
             print("{any}\n", .{transaction});
         }
 
-        print("-----> Script\n", .{});
+        print("\n-----> Script\n", .{});
         {
             const answer = "And he answering said, Thou shalt love the Lord thy God with all thy heart, and with all thy soul, and with all thy strength, and with all thy mind; and thy neighbour as thyself.";
             print("answer: \"{s}\"\n", .{answer});
@@ -196,36 +199,23 @@ pub fn main() !void {
             print("valid: {any}\n", .{valid});
         }
 
-        print("-----> Signing a transaction\n", .{});
+        print("\n-----> Signing a transaction\n", .{});
         {
-            const prvk = 0xf45e6907b16670196e487cf667e9fa510f0593276335da22311eb67c90d46421;
-            const pubk = CryptLib.G.muli(prvk);
+            const pubk = CryptLib.G.muli(privkey);
             var pubk_serialized: [33]u8 = undefined;
             pubk.serialize(true, &pubk_serialized);
-            //const faucetAddress = "tb1p4tp4l6glyr2gs94neqcpr5gha7344nfyznfkc8szkreflscsdkgqsdent4"; // I don't understand this address yet (Taproot or something)
-            const faucetPubKeyScript = [_]u8{ 0x51, 0x20, 0xaa, 0xc3, 0x5f, 0xe9, 0x1f, 0x20, 0xd4, 0x88, 0x16, 0xb3, 0xc8, 0x30, 0x11, 0xd1, 0x17, 0xef, 0xa3, 0x5a, 0xcd, 0x24, 0x14, 0xd3, 0x6c, 0x1e, 0x02, 0xb0, 0xf2, 0x9f, 0xc3, 0x10, 0x6d, 0x90 };
-            const prev_txid = 0xbd9d8ea4a30d9465159f199c48acda11441d8bcd66020ad55a1215015431bb18;
-            const prev_script_pubkey = [_]u8{ 0x00, 0x14, 0xbf, 0x9d, 0x74, 0xa5, 0x0e, 0x3b, 0x9c, 0x9a, 0xca, 0x37, 0x08, 0xca, 0x95, 0x14, 0x19, 0xbb, 0xd6, 0xfa, 0x32, 0x63 };
+            const prev_txid = 0x38067470a9a51bea07c1f8b7f51d75d521b57ca9c9d1bf68a2467efe79971fd2;
+            const prev_script_pubkey = [_]u8{ 0x76, 0xa9, 0x14, 0xaf, 0x72, 0x4f, 0xc6, 0x1f, 0x4d, 0x5c, 0x4d, 0xb0, 0x6b, 0x33, 0x95, 0xc9, 0xb4, 0x50, 0xa8, 0x0d, 0x25, 0xb6, 0x73, 0x88, 0xac };
+            const targetAddress = "mnvfTUzPbeWBxwxinm37C1bsQ5ckZuN9E7";
 
             var transaction = Bitcoin.Tx{
                 .version = 1,
-                .inputs = try std.heap.page_allocator.dupe(Bitcoin.Tx.TxInput, &inputs: {
-                    break :inputs [_]Bitcoin.Tx.TxInput{
-                        Bitcoin.Tx.TxInput{
-                            .txid = prev_txid,
-                            .index = 1,
-                            .script_sig = &[_]u8{},
-                            .sequence = 0xffffffff,
-                        },
-                    };
+                .inputs = try std.heap.page_allocator.dupe(Bitcoin.Tx.TxInput, &.{
+                    .{ .txid = prev_txid, .index = 1, .script_sig = &[_]u8{}, .sequence = 0xfffffffd },
                 }),
                 .outputs = try std.heap.page_allocator.dupe(Bitcoin.Tx.TxOutput, &outputs: {
-                    var outputs = [_]Bitcoin.Tx.TxOutput{
-                        Bitcoin.Tx.TxOutput{
-                            .amount = 600,
-                            .script_pubkey = try std.heap.page_allocator.dupe(u8, &faucetPubKeyScript),
-                        },
-                        Bitcoin.Tx.TxOutput{
+                    var outputs = .{
+                        .{
                             .amount = 5000,
                             .script_pubkey = script_pubkey: {
                                 // @TODO refactor this
@@ -234,7 +224,24 @@ pub fn main() !void {
                                 script_pubkey[0] = Op.OP_DUP;
                                 script_pubkey[1] = Op.OP_HASH160;
                                 script_pubkey[2] = 0x14;
-                                Bitcoin.hash160(&pubk_serialized, script_pubkey[3..23]);
+                                std.mem.copyForwards(u8, script_pubkey[3..23], pubk_hash: {
+                                    var buffer: [128]u8 = undefined;
+                                    const start = Bitcoin.Base58.decode(targetAddress, &buffer);
+                                    std.debug.assert(buffer.len - start == 1 + 20 + 4); // net_flag + address + checksum
+                                    std.debug.assert(buffer[start] == 0x6f); // testnet
+                                    std.debug.assert(std.mem.eql(
+                                        u8,
+                                        buffer[buffer.len - 4 ..][0..4],
+                                        checksum: {
+                                            var hash1: [32]u8 = undefined;
+                                            Sha256.hash(buffer[start .. buffer.len - 4], &hash1, .{});
+                                            var hash2: [32]u8 = undefined;
+                                            Sha256.hash(&hash1, &hash2, .{});
+                                            break :checksum hash2[0..4];
+                                        },
+                                    ));
+                                    break :pubk_hash buffer[start + 1 .. buffer.len - 4];
+                                });
                                 script_pubkey[23] = Op.OP_EQUALVERIFY;
                                 script_pubkey[24] = Op.OP_CHECKSIG;
                                 break :script_pubkey script_pubkey;
@@ -247,21 +254,25 @@ pub fn main() !void {
             };
             defer transaction.deinit();
 
-            try transaction.sign(prvk, 0, &prev_script_pubkey);
+            try transaction.sign(privkey, 0, &prev_script_pubkey);
 
             const serialized = try transaction.serialize();
             print("entire transaction: ", .{});
             for (serialized) |b| print("{x:0>2}", .{b});
             print("\n", .{});
 
+            print("\nNote that the above transaction (with a different signature, of course) was successfully broadcasted to signet with the TXID d5cf8e758abc178121736c9cbb0defe075ef50da4dfb4e736b19f2a2ff66dd14 (\n", .{});
+
+            print("\n-----> Validating transaction signature\n", .{});
             const checksig = try Bitcoin.Tx.checksig(
                 &transaction,
                 0,
                 &pubk_serialized,
-                transaction.inputs[0].script_sig[1..74],
+                transaction.inputs[0].script_sig[1..][0..(transaction.inputs[0].script_sig[0])],
+                //transaction.witness.?[0], // or above
                 &prev_script_pubkey,
             );
-            print("checksig: {}\n", .{checksig});
+            print("OP_CHECKSIG result: {s}\n", .{if (checksig) "valid" else "invalid"});
         }
     }
 }

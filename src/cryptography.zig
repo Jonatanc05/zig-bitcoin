@@ -28,12 +28,33 @@ pub const Signature = struct {
     r: u256,
     s: u256,
 
-    pub fn serialize(self: *const Signature, out: *[72]u8) void {
-        // @TODO can save two bytes when padding not needed
+    /// Returns a slice of the `out` buffer
+    pub fn serialize(self: *const Signature, out: *[72]u8) []u8 {
+        // @TODO does not perfectly conform to Bitcoin Core
+        // do simplest possible serialization, then remove excessive padding
         std.mem.copyForwards(u8, out[0..5], &.{ 0x30, 0x46, 0x02, 0x21, 0x00 });
         std.mem.writeInt(u256, out[5..37], self.r, .big);
         std.mem.copyForwards(u8, out[37..40], &.{ 0x02, 0x21, 0x00 });
         std.mem.writeInt(u256, out[40..72], self.s, .big);
+        var sig_len: usize = 72;
+
+        while (out[4] == 0x00 and (out[5] & 0b1000_0000) == 0) {
+            // remove 0x00 and move all next bytes once to the left
+            for (4..sig_len - 1) |index| out[index] = out[index + 1];
+            sig_len = sig_len - 1;
+            out[3] = out[3] - 1; // decrement length of r
+        }
+
+        const s_len_index = out[3] + 5;
+        while (out[out[3] + 6] == 0x00 and (out[out[3] + 7] & 0b1000_0000) == 0) {
+            // remove 0x00 and move all next bytes once to the left
+            for ((out[3] + 6)..sig_len - 1) |index| out[index] = out[index + 1];
+            sig_len = sig_len - 1;
+            out[s_len_index] = out[s_len_index] - 1; // decrement length of s
+        }
+
+        out[1] = @intCast(sig_len - 2);
+        return out[0..sig_len];
     }
 
     pub fn parse(bytes: []const u8) Signature {
@@ -49,6 +70,7 @@ pub const Signature = struct {
         assert(s_len_index + s_len == bytes.len - 1);
         assert(r_len == 32 or r_len == 33);
         assert(s_len == 32 or s_len == 33);
+        assert(r_len + s_len + 6 == bytes.len);
 
         var r_buffer: [32]u8 = .{0} ** 32;
         {
@@ -92,6 +114,8 @@ pub fn sign(z: u256, e: u256) Signature {
         temp = @mod(temp, secp256k1_n);
         temp = temp * k_inv;
         temp = @mod(temp, secp256k1_n);
+        if (temp > secp256k1_n / 2)
+            temp = secp256k1_n - temp;
         break :s_calc @intCast(temp);
     };
     return Signature{ .r = r, .s = s };
@@ -143,9 +167,9 @@ test "serialized signature" {
         .r = hashAsU256("idk"),
         .s = hashAsU256("anything"),
     };
-    var serialized_sig: [72]u8 = undefined;
-    sig.serialize(&serialized_sig);
-    const sig_parsed = Signature.parse(&serialized_sig);
+    var serialized_sig_buffer: [72]u8 = undefined;
+    const serialized_sig = sig.serialize(&serialized_sig_buffer);
+    const sig_parsed = Signature.parse(serialized_sig);
     try std.testing.expectEqualDeep(sig, sig_parsed);
 
     const sig2 = Signature.parse(&.{ 0x30, 0x44, 0x02, 0x20, 0x39, 0x43, 0x58, 0x0d, 0x54, 0x54, 0x70, 0xe1, 0x9b, 0xd9, 0xc7, 0x92, 0x4e, 0x08, 0x11, 0xc3, 0x34, 0x83, 0x16, 0xa7, 0xef, 0x12, 0x9b, 0xcb, 0x6b, 0xe1, 0xab, 0x03, 0x88, 0x76, 0x95, 0x98, 0x02, 0x20, 0x41, 0xe6, 0x3a, 0xb6, 0x08, 0x7b, 0x79, 0x20, 0x70, 0x59, 0x26, 0xf6, 0xb9, 0x50, 0x04, 0xd0, 0x8e, 0x01, 0xc1, 0xf8, 0x16, 0x38, 0xca, 0x71, 0x53, 0x97, 0xa7, 0xf0, 0x81, 0x6e, 0xc8, 0x87 });

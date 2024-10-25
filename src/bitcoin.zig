@@ -18,8 +18,8 @@ pub const Base58 = struct {
     const alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 
     // @TODO refator to return a []u8 instead
-    // returns in what index we can start reading the ouput
-    // reads bytes as big endian
+    /// Returns in what index we can start reading the ouput.
+    /// Reads bytes as big endian.
     pub fn encode(bytes: []const u8, out: []u8) usize {
         if (bytes.len > 128) @panic("Base58.encode: bytes is too large, only up to 128 bytes supported");
         var bytes_extended: [128]u8 = undefined;
@@ -39,16 +39,16 @@ pub const Base58 = struct {
         return i;
     }
 
-    // returns in what index we can start reading the ouput
-    // writes out as big endian
-    pub fn decode(bytes: []const u8, out: *[1024 / 8]u8) usize {
+    /// Returns in what index we can start reading the ouput.
+    /// Writes out as big endian.
+    pub fn decode(address_str: []const u8, out: *[1024 / 8]u8) usize {
         var bytes_as_u1024: u1024 = 0;
         {
             var multiplier: u1024 = 1;
-            var i = bytes.len;
+            var i = address_str.len;
             while (i > 0) : (i -= 1) {
                 bytes_as_u1024 += increment: {
-                    const algarism = bytes[i - 1];
+                    const algarism = address_str[i - 1];
                     const algarism_value: u1024 = for (alphabet, 0..) |symbol, j| {
                         if (symbol == algarism) break @intCast(j);
                     } else @panic("Base58.decode: invalid character");
@@ -77,6 +77,70 @@ pub fn hash160(bytes: []const u8, out: []u8) void {
     c_ripemd.calc_hash(&sha256_1, @ptrCast(out));
 }
 
+pub const Address = struct {
+    /// returns index to start reading the ouput
+    pub fn fromPrivkey(privkey: u256, testnet: bool, out: []u8) usize {
+        const pubkey = CryptLib.G.muli(privkey);
+        return fromPubkey(pubkey, testnet, out);
+    }
+
+    /// returns index to start reading the ouput
+    pub fn fromPubkey(pubkey: EllipticCurveLib.CurvePoint(u256), testnet: bool, out: []u8) usize {
+        const hash160_data: [21]u8 = hash160_data: {
+            var hash160_data: [21]u8 = undefined;
+            var serializedPoint: [33]u8 = undefined;
+            pubkey.serialize(true, &serializedPoint);
+            hash160(&serializedPoint, hash160_data[1..]);
+            hash160_data[0] = if (testnet) 0x6f else 0x00;
+            break :hash160_data hash160_data;
+        };
+
+        const checksum: [4]u8 = checksum: {
+            var sha256_1: [32]u8 = undefined;
+            Sha256.hash(&hash160_data, &sha256_1, .{});
+
+            var sha256_2: [32]u8 = undefined;
+            Sha256.hash(&sha256_1, &sha256_2, .{});
+
+            var checksum: [4]u8 = undefined;
+            std.mem.copyForwards(u8, &checksum, sha256_2[0..4]);
+            break :checksum checksum;
+        };
+
+        const address = hash160_data ++ checksum;
+        const start = Base58.encode(&address, out[0..]);
+        if (testnet) return start;
+        out[start - 1] = '1';
+        return start - 1;
+    }
+
+    /// Returns index to start reading the ouput.
+    /// If expect_testnet is not null, it will be checked against the address on Debug builds
+    pub fn toPubkey(address: []const u8, expect_testnet: ?bool) []u8 {
+        var buffer: [128]u8 = undefined;
+        const start = Base58.decode(address, &buffer);
+        std.debug.assert(buffer.len - start == 1 + 20 + 4); // net_flag + address + checksum
+        if (expect_testnet != null) {
+            if (expect_testnet.?) {
+                std.debug.assert(buffer[start] == 0x6f);
+            } else {
+                std.debug.assert(buffer[start] == 0x00);
+            }
+        }
+        std.debug.assert(std.mem.eql(
+            u8,
+            buffer[buffer.len - 4 ..][0..4],
+            checksum: {
+                var hash1: [32]u8 = undefined;
+                Sha256.hash(buffer[start .. buffer.len - 4], &hash1, .{});
+                var hash2: [32]u8 = undefined;
+                Sha256.hash(&hash1, &hash2, .{});
+                break :checksum hash2[0..4];
+            },
+        ));
+        return buffer[start + 1 .. buffer.len - 4];
+    }
+};
 /// returns index to start reading the ouput
 pub fn btcAddress(pubkey: EllipticCurveLib.CurvePoint(u256), out: []u8, testnet: bool) usize {
     var hash160_data: [21]u8 = undefined;
@@ -101,22 +165,54 @@ pub fn btcAddress(pubkey: EllipticCurveLib.CurvePoint(u256), out: []u8, testnet:
 }
 
 pub const Tx = struct {
+    /// usually 1
     version: u32,
     inputs: []TxInput,
     outputs: []TxOutput,
     witness: ?[][]u8 = null,
+    /// usually 0
     locktime: u32,
 
     pub const TxInput = struct {
         txid: u256,
         index: u32,
         script_sig: []const u8,
+        /// usually 0xfffffffd
         sequence: u32,
     };
     pub const TxOutput = struct {
         amount: u64,
         script_pubkey: []const u8,
     };
+
+    pub fn initP2PKH(testnet: bool, prev_txid: u256, prev_output_index: u32, amount: u64, target_address: []const u8) !Tx {
+        return .{
+            .version = 1,
+            .inputs = try allocator.dupe(TxInput, &.{
+                .{ .txid = prev_txid, .index = prev_output_index, .script_sig = &[_]u8{}, .sequence = 0xfffffffd },
+            }),
+            .outputs = try allocator.dupe(TxOutput, &outputs: {
+                var outputs = .{
+                    .{
+                        .amount = amount,
+                        .script_pubkey = script_pubkey: {
+                            var script_pubkey: []u8 = try allocator.alloc(u8, 25);
+                            const Op = Script.Opcode;
+                            script_pubkey[0] = Op.OP_DUP;
+                            script_pubkey[1] = Op.OP_HASH160;
+                            script_pubkey[2] = 0x14; // P2PKH address is 20 bytes
+                            std.mem.copyForwards(u8, script_pubkey[3..23], Address.toPubkey(target_address, testnet));
+                            script_pubkey[23] = Op.OP_EQUALVERIFY;
+                            script_pubkey[24] = Op.OP_CHECKSIG;
+                            break :script_pubkey script_pubkey;
+                        },
+                    },
+                };
+                break :outputs outputs;
+            }),
+            .locktime = 0,
+        };
+    }
 
     pub fn deinit(self: *const Tx) void {
         for (self.inputs) |input| {
@@ -356,13 +452,13 @@ pub const Script = struct {
         /// Points to first empty index
         top: usize = 0,
 
-        //Same behaviour as Bitcoin Core:
-        //   "Numeric opcodes (OP_ADD, etc) are restricted to operating on 4-byte integers.
-        //    The semantics are subtle, though: operands must be in the range [-2^31 +1...2^31 -1],
-        //    but results may overflow (and are valid as long as they are not used in a subsequent
-        //    numeric operation). CScriptNum enforces those semantics by storing results as
-        //    an int64 and allowing out-of-range values to be returned as a vector of bytes but
-        //    throwing an exception if arithmetic is done or the result is interpreted as an integer."
+        ///Same behaviour as Bitcoin Core:
+        ///   "Numeric opcodes (OP_ADD, etc) are restricted to operating on 4-byte integers.
+        ///    The semantics are subtle, though: operands must be in the range [-2^31 +1...2^31 -1],
+        ///    but results may overflow (and are valid as long as they are not used in a subsequent
+        ///    numeric operation). CScriptNum enforces those semantics by storing results as
+        ///    an int64 and allowing out-of-range values to be returned as a vector of bytes but
+        ///    throwing an exception if arithmetic is done or the result is interpreted as an integer."
         const Int = i64;
 
         const Self = @This();
@@ -388,7 +484,7 @@ pub const Script = struct {
             push(self, std.mem.asBytes(&value));
         }
 
-        // @TODO migrate all code to popSafe
+        /// @TODO migrate all code to popSafe
         fn pop(self: *Self) PopError![]u8 {
             if (self.top == 0)
                 return error.EmptyStack;
@@ -432,9 +528,9 @@ pub const Script = struct {
         }
         const PopIntError = PopError || error{NotAnOperableInteger};
 
-        // Only false when top value is existent AND not true.
-        // Zero, negative zero and empty array are all treated as false.
-        // Anything else is treated as true.
+        /// Only false when top value is existent AND not true.
+        /// Zero, negative zero and empty array are all treated as false.
+        /// Anything else is treated as true.
         fn verify(self: *Stack) bool {
             const value = self.pop() catch |err| return err == error.EmptyStack;
             const all_zero = for (value, 0..) |byte, index| {
@@ -631,9 +727,8 @@ test "base58 encoding and decoding" {
 
 test "btc address" {
     const prvk = 0x5da1cb5b4282e3f5c2314df81a3711fa7f0217401de5f72da0ab4906fab04f4c;
-    const pubk = CryptLib.G.muli(prvk);
     var out: [40]u8 = undefined;
-    const start = btcAddress(pubk, out[0..], false);
+    const start = Address.fromPrivkey(prvk, false, out[0..]);
     try expect(std.mem.eql(u8, out[start..], "1GHqmiofmT3PgrZDf7fcq632xybfg6onG4"));
 }
 
@@ -709,27 +804,27 @@ test "transaction signing and checksig" {
     pubk.serialize(true, &pubk_serialized);
     const prev_txid = 0x38067470a9a51bea07c1f8b7f51d75d521b57ca9c9d1bf68a2467efe79971fd2;
     const prev_script_pubkey = [_]u8{ 0x76, 0xa9, 0x14, 0xaf, 0x72, 0x4f, 0xc6, 0x1f, 0x4d, 0x5c, 0x4d, 0xb0, 0x6b, 0x33, 0x95, 0xc9, 0xb4, 0x50, 0xa8, 0x0d, 0x25, 0xb6, 0x73, 0x88, 0xac };
-    const targetAddress = "mnvfTUzPbeWBxwxinm37C1bsQ5ckZuN9E7";
+    const target_address = "mnvfTUzPbeWBxwxinm37C1bsQ5ckZuN9E7";
 
     var transaction = Tx{
         .version = 1,
-        .inputs = try std.heap.page_allocator.dupe(Tx.TxInput, &.{
+        .inputs = try allocator.dupe(Tx.TxInput, &.{
             .{ .txid = prev_txid, .index = 1, .script_sig = &[_]u8{}, .sequence = 0xfffffffd },
         }),
-        .outputs = try std.heap.page_allocator.dupe(Tx.TxOutput, &outputs: {
+        .outputs = try allocator.dupe(Tx.TxOutput, &outputs: {
             var outputs = .{
                 .{
                     .amount = 5000,
                     .script_pubkey = script_pubkey: {
                         // @TODO refactor this
-                        var script_pubkey: []u8 = try std.heap.page_allocator.alloc(u8, 25);
+                        var script_pubkey: []u8 = try allocator.alloc(u8, 25);
                         const Op = Script.Opcode;
                         script_pubkey[0] = Op.OP_DUP;
                         script_pubkey[1] = Op.OP_HASH160;
                         script_pubkey[2] = 0x14;
                         std.mem.copyForwards(u8, script_pubkey[3..23], pubk_hash: {
                             var buffer: [128]u8 = undefined;
-                            const start = Base58.decode(targetAddress, &buffer);
+                            const start = Base58.decode(target_address, &buffer);
                             std.debug.assert(buffer.len - start == 1 + 20 + 4); // net_flag + address + checksum
                             std.debug.assert(buffer[start] == 0x6f); // testnet
                             std.debug.assert(std.mem.eql(

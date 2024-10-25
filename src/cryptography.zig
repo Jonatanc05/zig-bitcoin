@@ -102,6 +102,7 @@ pub fn generateKeyPair() struct { pubk: CurvePoint, prvk: u256 } {
     return .{ .pubk = P, .prvk = e };
 }
 
+/// z is the message hash and e is the private key
 pub fn sign(z: u256, e: u256) Signature {
     const k = std.crypto.random.int(u256);
     const r = G.muli(k).x.?.value;
@@ -121,6 +122,7 @@ pub fn sign(z: u256, e: u256) Signature {
     return Signature{ .r = r, .s = s };
 }
 
+/// z is the message hash and P is the public key
 pub fn verify(z: u256, P: CurvePoint, sig: Signature) bool {
     const s_inv = FieldElement.modpow(sig.s, secp256k1_n - 2, secp256k1_n);
 

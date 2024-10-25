@@ -24,7 +24,7 @@ pub const Cursor = struct {
         }
     }
 
-    // Little endian
+    /// Little endian
     pub fn readInt(self: *Cursor, comptime T: type) T {
         comptime assert(@typeInfo(T).Int.signedness == .unsigned);
         self.assertCanRead(@sizeOf(T));

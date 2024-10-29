@@ -143,20 +143,17 @@ pub const Address = struct {
 };
 
 pub const Tx = struct {
-    /// usually 1
-    version: u32,
+    version: u32 = 1,
     inputs: []TxInput,
     outputs: []TxOutput,
     witness: ?[][]u8 = null,
-    /// usually 0
-    locktime: u32,
+    locktime: u32 = 0,
 
     pub const TxInput = struct {
         txid: u256,
         index: u32,
         script_sig: []const u8,
-        /// usually 0xfffffffd
-        sequence: u32,
+        sequence: u32 = 0xfffffffd,
     };
     pub const TxOutput = struct {
         amount: u64,
@@ -234,7 +231,8 @@ pub const Tx = struct {
             allocator.destroy(tx_copy);
         }
 
-        const tx_copy_bytes = try tx_copy.serialize();
+        const tx_copy_bytes = try tx_copy.serialize(allocator);
+        defer allocator.free(tx_copy_bytes);
         const tx_copy_with_hashtype = try std.mem.concat(allocator, u8, &[_][]const u8{ tx_copy_bytes, &[4]u8{ hashtype, 0, 0, 0 } });
         return double_hash: {
             const hash1 = CryptLib.hashAsU256(tx_copy_with_hashtype);
@@ -305,8 +303,8 @@ pub const Tx = struct {
         return CryptLib.verify(z, pubkey_parsed, CryptLib.Signature.parse(sig));
     }
 
-    pub fn serialize(self: *const Tx) ![]u8 {
-        var bytes = try std.ArrayList(u8).initCapacity(allocator, 100);
+    pub fn serialize(self: *const Tx, alloc: std.mem.Allocator) ![]u8 {
+        var bytes = try std.ArrayList(u8).initCapacity(alloc, 100);
         defer bytes.deinit();
         const Aux = struct {
             pub fn writeVarint(stream: std.io.AnyWriter, value: u32) !void {
@@ -325,41 +323,43 @@ pub const Tx = struct {
             }
         };
 
-        try bytes.writer().writeInt(u32, self.version, .little);
+        const writer = bytes.writer();
+
+        try writer.writeInt(u32, self.version, .little);
 
         if (self.witness != null) {
-            try bytes.writer().writeByte(0);
-            try bytes.writer().writeByte(1);
+            try writer.writeByte(0);
+            try writer.writeByte(1);
         }
 
-        try Aux.writeVarint(bytes.writer().any(), @intCast(self.inputs.len));
+        try Aux.writeVarint(writer.any(), @intCast(self.inputs.len));
         for (self.inputs) |input| {
-            try bytes.writer().writeInt(u256, input.txid, .little);
-            try bytes.writer().writeInt(u32, input.index, .little);
-            try Aux.writeVarint(bytes.writer().any(), @intCast(input.script_sig.len));
-            try bytes.writer().writeAll(input.script_sig);
-            try bytes.writer().writeInt(u32, input.sequence, .little);
+            try writer.writeInt(u256, input.txid, .little);
+            try writer.writeInt(u32, input.index, .little);
+            try Aux.writeVarint(writer.any(), @intCast(input.script_sig.len));
+            try writer.writeAll(input.script_sig);
+            try writer.writeInt(u32, input.sequence, .little);
         }
 
-        try Aux.writeVarint(bytes.writer().any(), @intCast(self.outputs.len));
+        try Aux.writeVarint(writer.any(), @intCast(self.outputs.len));
         for (self.outputs) |output| {
-            try bytes.writer().writeInt(u64, output.amount, .little);
-            try Aux.writeVarint(bytes.writer().any(), @intCast(output.script_pubkey.len));
-            try bytes.writer().writeAll(output.script_pubkey);
+            try writer.writeInt(u64, output.amount, .little);
+            try Aux.writeVarint(writer.any(), @intCast(output.script_pubkey.len));
+            try writer.writeAll(output.script_pubkey);
         }
 
         if (self.witness) |witness| {
-            try Aux.writeVarint(bytes.writer().any(), @intCast(witness.len));
+            try Aux.writeVarint(writer.any(), @intCast(witness.len));
             for (witness) |item| {
-                try Aux.writeVarint(bytes.writer().any(), @intCast(item.len));
-                try bytes.writer().writeAll(item);
+                try Aux.writeVarint(writer.any(), @intCast(item.len));
+                try writer.writeAll(item);
             }
         } else {
             // MrRGnome said non-segwit transactions also have witness???
-            //try Aux.writeVarint(bytes.writer().any(), 0);
+            //try Aux.writeVarint(writer.any(), 0);
         }
 
-        try bytes.writer().writeInt(u32, self.locktime, .little);
+        try writer.writeInt(u32, self.locktime, .little);
         return bytes.toOwnedSlice();
     }
 
@@ -368,25 +368,25 @@ pub const Tx = struct {
         var tx: Tx = undefined;
         var is_witness = false;
 
-        tx.version = cursor.readInt(u32);
+        tx.version = cursor.readInt(u32, .little);
 
         tx.inputs = inputs: {
             var n_inputs = cursor.readVarint();
             if (n_inputs == 0) { // witness marker
                 is_witness = true;
-                assert(cursor.readInt(u8) == 1); // witness flag
+                assert(cursor.readInt(u8, .little) == 1); // witness flag
                 n_inputs = cursor.readVarint();
             }
             const inputs = try allocator.alloc(TxInput, n_inputs);
             for (inputs) |*input| {
-                input.txid = cursor.readInt(u256);
-                input.index = cursor.readInt(u32);
+                input.txid = cursor.readInt(u256, .little);
+                input.index = cursor.readInt(u32, .little);
                 input.script_sig = script_sig: {
                     const script_sig = try allocator.alloc(u8, cursor.readVarint());
                     cursor.readBytes(script_sig);
                     break :script_sig script_sig;
                 };
-                input.sequence = cursor.readInt(u32);
+                input.sequence = cursor.readInt(u32, .little);
             }
             break :inputs inputs;
         };
@@ -395,7 +395,7 @@ pub const Tx = struct {
             const n_outputs = cursor.readVarint();
             const outputs = try allocator.alloc(TxOutput, n_outputs);
             for (outputs) |*output| {
-                output.amount = cursor.readInt(u64);
+                output.amount = cursor.readInt(u64, .little);
                 output.script_pubkey = script_pubkey: {
                     const script_pubkey = try allocator.alloc(u8, cursor.readVarint());
                     cursor.readBytes(script_pubkey);
@@ -417,7 +417,7 @@ pub const Tx = struct {
             break :witness temp_witness;
         };
 
-        tx.locktime = cursor.readInt(u32);
+        tx.locktime = cursor.readInt(u32, .little);
 
         return tx;
     }
@@ -451,7 +451,7 @@ pub const Script = struct {
 
         var cursor = Cursor.init(bytes);
         while (!cursor.ended()) {
-            const opcode = cursor.readInt(u8);
+            const opcode = cursor.readInt(u8, .little);
             switch (opcode) {
                 0x01...0x4b => { // Data
                     try instructions.append(.{
@@ -638,7 +638,7 @@ pub const Script = struct {
         const Op = Opcode;
         var scriptReader = Cursor.init(script);
         while (!scriptReader.ended()) {
-            const opcode = scriptReader.readInt(u8);
+            const opcode = scriptReader.readInt(u8, .little);
             switch (opcode) {
                 0x01...0x4b => { // Data
                     stack.push(script[scriptReader.index..][0..opcode]);
@@ -651,7 +651,7 @@ pub const Script = struct {
                     stack.push(&[1]u8{opcode - 0x50});
                 },
                 Op.OP_PUSHDATA1 => {
-                    const size = scriptReader.readInt(u8);
+                    const size = scriptReader.readInt(u8, .little);
                     stack.push(script[scriptReader.index..][0..size]);
                     scriptReader.index += @intCast(size);
                 },
@@ -750,6 +750,42 @@ pub const Script = struct {
     }
 };
 
+pub const Block = struct {
+    version: u32 = 0x20000002,
+    prev_block: u256,
+    merkle_root: u256,
+    timestamp: u32,
+    bits: u32,
+    nonce: u32,
+
+    pub fn serialize(self: *Block, alloc: std.mem.Allocator) ![]u8 {
+        var bytes = try std.ArrayList(u8).initCapacity(alloc, 100);
+        defer bytes.deinit();
+
+        const writer = bytes.writer();
+        try writer.writeInt(u32, self.version, .little);
+        try writer.writeInt(u256, self.prev_block, .little);
+        try writer.writeInt(u256, self.merkle_root, .little);
+        try writer.writeInt(u32, self.timestamp, .little);
+        try writer.writeInt(u32, self.bits, .big);
+        try writer.writeInt(u32, self.nonce, .big);
+
+        return bytes.toOwnedSlice();
+    }
+
+    pub fn parse(data: []const u8) !Block {
+        var cursor = Cursor.init(data);
+        var block: Block = undefined;
+        block.version = cursor.readInt(u32, .little);
+        block.prev_block = cursor.readInt(u256, .little);
+        block.merkle_root = cursor.readInt(u256, .little);
+        block.timestamp = cursor.readInt(u32, .little);
+        block.bits = cursor.readInt(u32, .big);
+        block.nonce = cursor.readInt(u32, .big);
+        return block;
+    }
+};
+
 //#region TESTS #########################################################################
 
 const expect = std.testing.expect;
@@ -808,7 +844,9 @@ test "parse and serialize p2pkh transaction" {
     const transaction = try Tx.parse(transaction_bytes[0..transaction_bytes.len]);
     defer transaction.deinit();
 
-    try std.testing.expectEqualSlices(u8, transaction_bytes[0..transaction_bytes.len], try transaction.serialize());
+    const serialized = try transaction.serialize(allocator);
+    defer allocator.free(serialized);
+    try std.testing.expectEqualSlices(u8, transaction_bytes[0..transaction_bytes.len], serialized);
 }
 
 test "parse p2wpkh transaction" {
@@ -940,6 +978,33 @@ test "transaction signing and checksig" {
     );
 
     try std.testing.expect(checksig);
+}
+
+test "isCoinbase" {
+    const tx_bytes = [_]u8{ 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0x5e, 0x03, 0xd7, 0x1b, 0x07, 0x25, 0x4d, 0x69, 0x6e, 0x65, 0x64, 0x20, 0x62, 0x79, 0x20, 0x41, 0x6e, 0x74, 0x50, 0x6f, 0x6f, 0x6c, 0x20, 0x62, 0x6a, 0x31, 0x31, 0x2f, 0x45, 0x42, 0x31, 0x2f, 0x41, 0x44, 0x36, 0x2f, 0x43, 0x20, 0x59, 0x14, 0x29, 0x31, 0x01, 0xfa, 0xbe, 0x6d, 0x6d, 0x67, 0x8e, 0x2c, 0x8c, 0x34, 0xaf, 0xc3, 0x68, 0x96, 0xe7, 0xd9, 0x40, 0x28, 0x24, 0xed, 0x38, 0xe8, 0x56, 0x67, 0x6e, 0xe9, 0x4b, 0xfd, 0xb0, 0xc6, 0xc4, 0xbc, 0xd8, 0xb2, 0xe5, 0x66, 0x6a, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc7, 0x27, 0x00, 0x00, 0xa5, 0xe0, 0x0e, 0x00, 0xff, 0xff, 0xff, 0xff, 0x01, 0xfa, 0xf2, 0x0b, 0x58, 0x00, 0x00, 0x00, 0x00, 0x19, 0x76, 0xa9, 0x14, 0x33, 0x8c, 0x84, 0x84, 0x94, 0x23, 0x99, 0x24, 0x71, 0xbf, 0xfb, 0x1a, 0x54, 0xa8, 0xd9, 0xb1, 0xd6, 0x9d, 0xc2, 0x8a, 0x88, 0xac, 0x00, 0x00, 0x00, 0x00 };
+    const tx = try Tx.parse(&tx_bytes);
+    try expect(tx.isCoinbase() == true);
+}
+
+test "Block parse" {
+    const block_raw = [_]u8{ 0x02, 0x00, 0x00, 0x20, 0x8e, 0xc3, 0x94, 0x28, 0xb1, 0x73, 0x23, 0xfa, 0x0d, 0xde, 0xc8, 0xe8, 0x87, 0xb4, 0xa7, 0xc5, 0x3b, 0x8c, 0x0a, 0x0a, 0x22, 0x0c, 0xfd, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x5b, 0x07, 0x50, 0xfc, 0xe0, 0xa8, 0x89, 0x50, 0x2d, 0x40, 0x50, 0x8d, 0x39, 0x57, 0x68, 0x21, 0x15, 0x5e, 0x9c, 0x9e, 0x3f, 0x5c, 0x31, 0x57, 0xf9, 0x61, 0xdb, 0x38, 0xfd, 0x8b, 0x25, 0xbe, 0x1e, 0x77, 0xa7, 0x59, 0xe9, 0x3c, 0x01, 0x18, 0xa4, 0xff, 0xd7, 0x1d };
+    const block = try Block.parse(&block_raw);
+    try expect(block.version == 0x20000002);
+    const expected_prev_block = std.mem.readInt(u256, &[_]u8{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xfd, 0x0c, 0x22, 0x0a, 0x0a, 0x8c, 0x3b, 0xc5, 0xa7, 0xb4, 0x87, 0xe8, 0xc8, 0xde, 0x0d, 0xfa, 0x23, 0x73, 0xb1, 0x28, 0x94, 0xc3, 0x8e }, .big);
+    try expect(block.prev_block == expected_prev_block);
+    const expected_merkle_root = std.mem.readInt(u256, &[_]u8{ 0xbe, 0x25, 0x8b, 0xfd, 0x38, 0xdb, 0x61, 0xf9, 0x57, 0x31, 0x5c, 0x3f, 0x9e, 0x9c, 0x5e, 0x15, 0x21, 0x68, 0x57, 0x39, 0x8d, 0x50, 0x40, 0x2d, 0x50, 0x89, 0xa8, 0xe0, 0xfc, 0x50, 0x07, 0x5b }, .big);
+    try expect(block.merkle_root == expected_merkle_root);
+    try expect(block.timestamp == 0x59a7771e);
+    try expect(block.bits == 0xe93c0118);
+    try expect(block.nonce == 0xa4ffd71d);
+}
+
+test "Block serialize" {
+    const block_raw = [_]u8{ 0x02, 0x00, 0x00, 0x20, 0x8e, 0xc3, 0x94, 0x28, 0xb1, 0x73, 0x23, 0xfa, 0x0d, 0xde, 0xc8, 0xe8, 0x87, 0xb4, 0xa7, 0xc5, 0x3b, 0x8c, 0x0a, 0x0a, 0x22, 0x0c, 0xfd, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x5b, 0x07, 0x50, 0xfc, 0xe0, 0xa8, 0x89, 0x50, 0x2d, 0x40, 0x50, 0x8d, 0x39, 0x57, 0x68, 0x21, 0x15, 0x5e, 0x9c, 0x9e, 0x3f, 0x5c, 0x31, 0x57, 0xf9, 0x61, 0xdb, 0x38, 0xfd, 0x8b, 0x25, 0xbe, 0x1e, 0x77, 0xa7, 0x59, 0xe9, 0x3c, 0x01, 0x18, 0xa4, 0xff, 0xd7, 0x1d };
+    var block = try Block.parse(&block_raw);
+    const serialized = try block.serialize(allocator);
+    defer allocator.free(serialized);
+    try std.testing.expectEqualSlices(u8, serialized, &block_raw);
 }
 
 //#endregion

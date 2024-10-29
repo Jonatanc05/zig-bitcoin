@@ -24,23 +24,22 @@ pub const Cursor = struct {
         }
     }
 
-    /// Little endian
-    pub fn readInt(self: *Cursor, comptime T: type) T {
+    pub fn readInt(self: *Cursor, comptime T: type, comptime endian: std.builtin.Endian) T {
         comptime assert(@typeInfo(T).Int.signedness == .unsigned);
         self.assertCanRead(@sizeOf(T));
         const n_bytes = @divExact(@typeInfo(T).Int.bits, 8);
-        const ret = std.mem.readInt(T, self.data[self.index..][0..n_bytes], .little);
+        const ret = std.mem.readInt(T, self.data[self.index..][0..n_bytes], endian);
         self.index += @sizeOf(T);
         return ret;
     }
 
     pub fn readVarint(self: *Cursor) u32 {
-        const first_byte = self.readInt(u8);
+        const first_byte = self.readInt(u8, .little);
         return switch (first_byte) {
             else => @intCast(first_byte),
-            0xfd => @intCast(self.readInt(u16)),
-            0xfe => @intCast(self.readInt(u24)),
-            0xff => @intCast(self.readInt(u32)),
+            0xfd => @intCast(self.readInt(u16, .little)),
+            0xfe => @intCast(self.readInt(u24, .little)),
+            0xff => @intCast(self.readInt(u32, .little)),
         };
     }
 

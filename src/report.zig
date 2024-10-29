@@ -211,7 +211,8 @@ pub fn print(privkey: u256) !void {
 
             try transaction.sign(privkey, 0, &prev_script_pubkey);
 
-            const serialized = try transaction.serialize();
+            const serialized = try transaction.serialize(std.heap.page_allocator);
+            defer std.heap.page_allocator.free(serialized);
             stdprint("entire transaction: ", .{});
             for (serialized) |b| stdprint("{x:0>2}", .{b});
             stdprint("\n", .{});

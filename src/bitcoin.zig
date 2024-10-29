@@ -70,7 +70,7 @@ pub const Base58 = struct {
     }
 };
 
-pub fn hash160(bytes: []const u8, out: []u8) void {
+fn hash160(bytes: []const u8, out: []u8) void {
     var sha256_1: [33]u8 = undefined;
     sha256_1[32] = 0x00;
     Sha256.hash(bytes, sha256_1[0..32], .{});
@@ -141,28 +141,6 @@ pub const Address = struct {
         return buffer[start + 1 .. buffer.len - 4];
     }
 };
-/// returns index to start reading the ouput
-pub fn btcAddress(pubkey: EllipticCurveLib.CurvePoint(u256), out: []u8, testnet: bool) usize {
-    var hash160_data: [21]u8 = undefined;
-    {
-        var serializedPoint: [33]u8 = undefined;
-        pubkey.serialize(true, &serializedPoint);
-        hash160(&serializedPoint, hash160_data[1..]);
-    }
-
-    hash160_data[0] = if (testnet) 0x6f else 0x00;
-    var sha256_2: [32]u8 = undefined;
-    Sha256.hash(&hash160_data, &sha256_2, .{});
-    var sha256_3: [32]u8 = undefined;
-    Sha256.hash(&sha256_2, &sha256_3, .{});
-    var checksum: [4]u8 = undefined;
-    std.mem.copyForwards(u8, &checksum, sha256_3[0..4]);
-    const address = hash160_data ++ checksum;
-    const start = Base58.encode(&address, out[0..]);
-    if (testnet) return start;
-    out[start - 1] = '1';
-    return start - 1;
-}
 
 pub const Tx = struct {
     /// usually 1
@@ -443,9 +421,66 @@ pub const Tx = struct {
 
         return tx;
     }
+
+    pub fn isCoinbase(self: *const Tx) bool {
+        return self.inputs.len == 1 and
+            self.inputs[0].txid == 0 and
+            self.inputs[0].index == 0xffffffff;
+    }
+
+    pub fn coinbaseBlockHeight(self: *const Tx) !u32 {
+        if (!isCoinbase(self)) return error.NotACoinbaseTransaction;
+        const script = try Script.parse(self.inputs[0].script_sig);
+        defer script.deinit();
+        std.debug.assert(script.instructions[0] == .data);
+        return script.instructions[0].data[0];
+    }
 };
 
 pub const Script = struct {
+    instructions: []const Instruction,
+
+    const Instruction = union(enum) {
+        opcode: u8,
+        data: []u8,
+    };
+
+    pub fn parse(bytes: []const u8) !Script {
+        var instructions = std.ArrayList(Instruction).init(allocator);
+        defer instructions.deinit();
+
+        var cursor = Cursor.init(bytes);
+        while (!cursor.ended()) {
+            const opcode = cursor.readInt(u8);
+            switch (opcode) {
+                0x01...0x4b => { // Data
+                    try instructions.append(.{
+                        .data = try allocator.dupe(u8, bytes[cursor.index..][0..opcode]),
+                    });
+                    cursor.index += @intCast(opcode);
+                },
+                else => {
+                    if (!Opcode.isSupported(opcode)) return error.OpcodeNotSupported;
+                    try instructions.append(.{ .opcode = opcode });
+                },
+            }
+        }
+
+        return Script{
+            .instructions = try instructions.toOwnedSlice(),
+        };
+    }
+
+    pub fn deinit(self: Script) void {
+        for (self.instructions) |inst| {
+            switch (inst) {
+                .data => |d| allocator.free(d),
+                .opcode => {},
+            }
+        }
+        allocator.free(self.instructions);
+    }
+
     const Stack = struct {
         data: []u8,
 
@@ -544,9 +579,12 @@ pub const Script = struct {
         }
     };
 
-    // This must not be an enum. An enum is a type. I want constants of type u8
+    // This must not be an enum. An enum is a type. I want constants of type u8. Which means this struct serves only as a namespace
     pub const Opcode = struct {
         pub const OP_0: u8 = 0;
+        pub const OP_PUSHDATA1: u8 = 0x4c;
+        pub const OP_PUSHDATA2: u8 = 0x4d;
+        pub const OP_PUSHDATA4: u8 = 0x4e;
         pub const OP_1: u8 = 0x51;
         pub const OP_2: u8 = 0x52;
         pub const OP_3: u8 = 0x53;
@@ -563,9 +601,6 @@ pub const Script = struct {
         pub const OP_14: u8 = 0x5e;
         pub const OP_15: u8 = 0x5f;
         pub const OP_16: u8 = 0x60;
-        pub const OP_PUSHDATA1: u8 = 0x4c;
-        pub const OP_PUSHDATA2: u8 = 0x4d;
-        pub const OP_PUSHDATA4: u8 = 0x4e;
         pub const OP_VERIFY: u8 = 0x69;
         pub const OP_2DUP: u8 = 0x6e;
         pub const OP_DUP: u8 = 0x76;
@@ -577,6 +612,26 @@ pub const Script = struct {
         pub const OP_SHA256: u8 = 0xa8;
         pub const OP_HASH160: u8 = 0xa9;
         pub const OP_CHECKSIG: u8 = 0xac;
+
+        pub fn isSupported(opcode: u8) bool {
+            if (opcode < OP_16) return true;
+
+            const values_supported = comptime res: {
+                var res = [_]u8{0} ** 60;
+                var next: usize = 0;
+                for (@typeInfo(Opcode).Struct.decls) |decl| {
+                    if (@TypeOf(@field(Opcode, decl.name)) != u8) continue;
+                    const value = @field(Opcode, decl.name);
+                    res[next] = value;
+                    next += 1;
+                }
+                break :res res;
+            };
+
+            return for (values_supported) |value| {
+                if (value == opcode) break true;
+            } else false;
+        }
     };
 
     pub fn run(script: []const u8, stack: *Stack, transaction: ?*Tx, input_index: ?usize) !void {
@@ -782,6 +837,26 @@ test "parse p2wpkh transaction" {
     try expect(transaction.inputs.len == 1);
     try expect(transaction.outputs.len == 2);
     try expect(transaction.outputs[1].amount == 6272);
+}
+
+test "Opcode.isSupported" {
+    const Op = Script.Opcode;
+    try expect(Op.isSupported(0) == true);
+    try expect(Op.isSupported(0x50) == true);
+    try expect(Op.isSupported(Op.OP_VERIFY) == true);
+    try expect(Op.isSupported(Op.OP_EQUAL) == true);
+    try expect(Op.isSupported(0xcf) == false);
+}
+
+test "Script parsing" {
+    const Op = Script.Opcode;
+    const script_bytes = [34]u8{ Op.OP_1, 0x20, 0xaa, 0xc3, 0x5f, 0xe9, 0x1f, 0x20, 0xd4, 0x88, 0x16, 0xb3, 0xc8, 0x30, 0x11, 0xd1, 0x17, 0xef, 0xa3, 0x5a, 0xcd, 0x24, 0x14, 0xd3, 0x6c, 0x1e, 0x02, 0xb0, 0xf2, 0x9f, 0xc3, 0x10, 0x6d, 0x90 };
+    const script = try Script.parse(script_bytes[0..]);
+    defer script.deinit();
+    try expect(script.instructions.len == 2);
+    try expect(script.instructions[0].opcode == Op.OP_1);
+    try expect(script.instructions[1].data.len == 32);
+    try std.testing.expectEqualSlices(u8, script_bytes[2..34], script.instructions[1].data);
 }
 
 test "Basic script" {

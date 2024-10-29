@@ -146,7 +146,7 @@ pub fn print(privkey: u256) !void {
             stdprint("{any}\n", .{transaction});
         }
 
-        stdprint("\n-----> Serialization 2 (a real transaction on https://mempool.space/signet/tx/bd9d8ea4a30d9465159f199c48acda11441d8bcd66020ad55a1215015431bb18)\n", .{});
+        stdprint("\n-----> Serialization SegWit (a real transaction on https://mempool.space/signet/tx/bd9d8ea4a30d9465159f199c48acda11441d8bcd66020ad55a1215015431bb18)\n", .{});
         {
             // zig fmt: off
             var transaction_bytes = [_]u8{

@@ -303,6 +303,7 @@ pub const Tx = struct {
         return CryptLib.verify(z, pubkey_parsed, CryptLib.Signature.parse(sig));
     }
 
+    /// Returns a slice owned by the caller
     pub fn serialize(self: *const Tx, alloc: std.mem.Allocator) ![]u8 {
         var bytes = try std.ArrayList(u8).initCapacity(alloc, 100);
         defer bytes.deinit();
@@ -758,6 +759,7 @@ pub const Block = struct {
     bits: u32,
     nonce: u32,
 
+    /// Returns a slice owned by the caller
     pub fn serialize(self: *Block, alloc: std.mem.Allocator) ![]u8 {
         var bytes = try std.ArrayList(u8).initCapacity(alloc, 100);
         defer bytes.deinit();
@@ -783,6 +785,16 @@ pub const Block = struct {
         block.bits = cursor.readInt(u32, .big);
         block.nonce = cursor.readInt(u32, .big);
         return block;
+    }
+
+    pub fn hash(self: *Block, buffer: []u8) !void {
+        std.debug.assert(buffer.len >= 32);
+        const serialized = try self.serialize(allocator);
+        defer allocator.free(serialized);
+        var intermediate_buffer1: [32]u8 = undefined;
+        Sha256.hash(serialized, intermediate_buffer1[0..32], .{});
+        Sha256.hash(intermediate_buffer1[0..32], buffer[0..32], .{});
+        std.mem.reverse(u8, buffer[0..32]);
     }
 };
 
@@ -1004,7 +1016,15 @@ test "Block serialize" {
     var block = try Block.parse(&block_raw);
     const serialized = try block.serialize(allocator);
     defer allocator.free(serialized);
-    try std.testing.expectEqualSlices(u8, serialized, &block_raw);
+    try std.testing.expectEqualSlices(u8, &block_raw, serialized);
+}
+
+test "Block hash" {
+    const block_raw = [_]u8{ 0x02, 0x00, 0x00, 0x20, 0x8e, 0xc3, 0x94, 0x28, 0xb1, 0x73, 0x23, 0xfa, 0x0d, 0xde, 0xc8, 0xe8, 0x87, 0xb4, 0xa7, 0xc5, 0x3b, 0x8c, 0x0a, 0x0a, 0x22, 0x0c, 0xfd, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x5b, 0x07, 0x50, 0xfc, 0xe0, 0xa8, 0x89, 0x50, 0x2d, 0x40, 0x50, 0x8d, 0x39, 0x57, 0x68, 0x21, 0x15, 0x5e, 0x9c, 0x9e, 0x3f, 0x5c, 0x31, 0x57, 0xf9, 0x61, 0xdb, 0x38, 0xfd, 0x8b, 0x25, 0xbe, 0x1e, 0x77, 0xa7, 0x59, 0xe9, 0x3c, 0x01, 0x18, 0xa4, 0xff, 0xd7, 0x1d };
+    var block = try Block.parse(&block_raw);
+    var hash: [32]u8 = undefined;
+    try block.hash(&hash);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x7e, 0x9e, 0x4c, 0x58, 0x64, 0x39, 0xb0, 0xcd, 0xbe, 0x13, 0xb1, 0x37, 0x0b, 0xdd, 0x94, 0x35, 0xd7, 0x6a, 0x64, 0x4d, 0x04, 0x75, 0x23 }, &hash);
 }
 
 //#endregion

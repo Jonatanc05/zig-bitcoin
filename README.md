@@ -7,18 +7,32 @@
 
 So I'm following [Jimmy Song's book](https://duckduckgo.com/?q=programming+bitcoin+jimmy+song&t=newext&atb=v407-1&ia=web) to have some hands-on experience with these topics. Note that it's a learning project not meant for any real use, although I would like to use it some day.
 
+I have some devlogs on https://publish.obsidian.md/jonata/notes/learn/Bitcoin/zig-bitcoin
+
 ## Requirements
 
 Currently building with Zig 0.12.0
 
 Windows 11 and Ubuntu WSL are usually tested.
 
+Before compiling, add a file called `.privkey` to the `src` directory. This file should contain hex characters representing the private key to use when signing transactions.
+Example: `echo 0a1a2a3a4a0a1a2a3a4a0a1a2a3a4a0a1a2a3a4a0a1a2a3a4a0a1a2a3a4a0a1a > src/.privkey`
+
 ## Screenshots
 
-Currently this is the hole program:
+Example of current program output:
 
 ```
 > zig build run
+
+################################################
+
+Hello dear hodler, tell me what can I do for you
+1. Show me what you got
+2. Sign a transaction
+3. Exit
+
+1
 
 ------------- FiniteFields -------------
 Element a: 10_F13

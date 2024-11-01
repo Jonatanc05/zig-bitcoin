@@ -621,8 +621,8 @@ pub const Script = struct {
                 var res = [_]u8{0} ** 60;
                 var next: usize = 0;
                 for (@typeInfo(Opcode).Struct.decls) |decl| {
-                    if (@TypeOf(@field(Opcode, decl.name)) != u8) continue;
                     const value = @field(Opcode, decl.name);
+                    if (@TypeOf(value) != u8) continue;
                     res[next] = value;
                     next += 1;
                 }

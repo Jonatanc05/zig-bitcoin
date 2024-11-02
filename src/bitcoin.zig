@@ -485,6 +485,8 @@ pub const Script = struct {
         /// Points to first empty index
         top: usize = 0,
 
+        const MAX_STACK_ELEMENT_SIZE: usize = 520;
+
         ///Same behaviour as Bitcoin Core:
         ///   "Numeric opcodes (OP_ADD, etc) are restricted to operating on 4-byte integers.
         ///    The semantics are subtle, though: operands must be in the range [-2^31 +1...2^31 -1],
@@ -514,11 +516,10 @@ pub const Script = struct {
         }
 
         fn pushInt(self: *Self, value: Self.Int) void {
-            push(self, std.mem.asBytes(&value));
+            self.push(std.mem.asBytes(&value));
         }
 
-        /// @TODO migrate all code to popSafe
-        fn pop(self: *Self) PopError![]u8 {
+        fn pop(self: *Self, buffer: []u8) PopSafeError![]u8 {
             if (self.top == 0)
                 return error.EmptyStack;
             self.top -= 1;
@@ -527,29 +528,24 @@ pub const Script = struct {
                 return error.Corrupted;
             if (next_byte == 0)
                 return &[_]u8{};
-            const ret = self.data[self.top - next_byte .. self.top];
-            self.top -= next_byte;
-            return ret;
-        }
-        const PopError = error{ EmptyStack, Corrupted };
-
-        fn popSafe(self: *Self, buffer: []u8) PopSafeError![]u8 {
-            const popped = try self.pop();
-            if (popped.len > buffer.len)
+            if (next_byte > buffer.len)
                 return error.OutBufferTooSmall;
-            std.mem.copyForwards(u8, buffer, popped);
-            return buffer[0..popped.len];
+            const ret = self.data[self.top - next_byte .. self.top];
+            std.mem.copyForwards(u8, buffer[0..next_byte], ret);
+            self.top -= next_byte;
+            return buffer[0..next_byte];
         }
-        const PopSafeError = PopError || error{OutBufferTooSmall};
+        const PopSafeError = error{ EmptyStack, Corrupted, OutBufferTooSmall };
 
         fn popInt(self: *Self) PopIntError!Self.Int {
-            const data = try self.pop();
+            var buffer_data: [4]u8 = undefined;
+            const data = try self.pop(&buffer_data);
             if (data.len > 4) {
                 return error.NotAnOperableInteger;
             } else if (data.len == 4) {
-                const data_as_unsigned: *u32 = @ptrCast(@alignCast(data));
-                const sign_as_int: Self.Int = if (data_as_unsigned.* & 0x80000000 != 0) -1 else 1;
-                const value: Self.Int = (data_as_unsigned.* & 0x7FFFFFFF);
+                const data_as_unsigned = std.mem.readInt(u32, data[0..4], .big);
+                const sign_as_int: Self.Int = if (data_as_unsigned & 0x80000000 != 0) -1 else 1;
+                const value: Self.Int = (data_as_unsigned & 0x7FFFFFFF);
 
                 return sign_as_int * value;
             } else if (data.len == 1) {
@@ -559,13 +555,14 @@ pub const Script = struct {
                 @panic("Not handling this case yet: popping more than 1 but less than 4 bytes");
             }
         }
-        const PopIntError = PopError || error{NotAnOperableInteger};
+        const PopIntError = PopSafeError || error{NotAnOperableInteger};
 
         /// Only false when top value is existent AND not true.
         /// Zero, negative zero and empty array are all treated as false.
         /// Anything else is treated as true.
         fn verify(self: *Stack) bool {
-            const value = self.pop() catch |err| return err == error.EmptyStack;
+            var buffer_value: [MAX_STACK_ELEMENT_SIZE]u8 = undefined;
+            const value = self.pop(&buffer_value) catch |err| return err == error.EmptyStack;
             const all_zero = for (value, 0..) |byte, index| {
                 if (index == value.len - 1 and byte == 0x80) continue; // account for negative zero
                 if (byte != 0) break false;
@@ -658,33 +655,41 @@ pub const Script = struct {
                         return error.VerifyFailed;
                 },
                 Op.OP_2DUP => {
-                    const a: []u8 = stack.pop() catch return error.BadScript;
-                    const b: []u8 = stack.pop() catch return error.BadScript;
+                    var buffer_a: [Stack.MAX_STACK_ELEMENT_SIZE]u8 = undefined;
+                    var buffer_b: [Stack.MAX_STACK_ELEMENT_SIZE]u8 = undefined;
+                    const a = try stack.pop(&buffer_a);
+                    const b = try stack.pop(&buffer_b);
                     stack.push(a);
                     stack.push(b);
                     stack.push(a);
                     stack.push(b);
                 },
                 Op.OP_DUP => {
-                    const value: []u8 = stack.pop() catch return error.BadScript;
+                    var buffer_value: [Stack.MAX_STACK_ELEMENT_SIZE]u8 = undefined;
+                    const value = try stack.pop(&buffer_value);
                     stack.push(value);
                     stack.push(value);
                 },
                 Op.OP_EQUAL => {
-                    const a: []u8 = stack.pop() catch return error.BadScript;
-                    const b: []u8 = stack.pop() catch return error.BadScript;
+                    var buffer_a: [Stack.MAX_STACK_ELEMENT_SIZE]u8 = undefined;
+                    var buffer_b: [Stack.MAX_STACK_ELEMENT_SIZE]u8 = undefined;
+                    const a = try stack.pop(&buffer_a);
+                    const b = try stack.pop(&buffer_b);
                     const eq: u8 = if (std.mem.eql(u8, a, b)) 1 else 0;
                     stack.push(&[1]u8{eq});
                 },
                 Op.OP_EQUALVERIFY => {
-                    const a: []u8 = stack.pop() catch return error.BadScript;
-                    const b: []u8 = stack.pop() catch return error.BadScript;
+                    var buffer_a: [Stack.MAX_STACK_ELEMENT_SIZE]u8 = undefined;
+                    var buffer_b: [Stack.MAX_STACK_ELEMENT_SIZE]u8 = undefined;
+                    const a = try stack.pop(&buffer_a);
+                    const b = try stack.pop(&buffer_b);
                     if (!std.mem.eql(u8, a, b)) {
                         return error.VerifyFailed;
                     }
                 },
                 Op.OP_NOT => {
-                    const value: []u8 = stack.pop() catch return error.BadScript;
+                    var buffer_value: [Stack.MAX_STACK_ELEMENT_SIZE]u8 = undefined;
+                    const value = try stack.pop(&buffer_value);
                     const equals_zero: u8 = for (value) |byte| {
                         if (byte != 0) break 0;
                     } else 1;
@@ -703,15 +708,16 @@ pub const Script = struct {
                     stack.pushInt(value);
                 },
                 Op.OP_SHA256 => {
-                    const value: []u8 = stack.pop() catch return error.BadScript;
+                    var buffer_value: [Stack.MAX_STACK_ELEMENT_SIZE]u8 = undefined;
+                    const value = try stack.pop(&buffer_value);
                     var value_hash: [32]u8 = undefined;
                     Sha256.hash(value, &value_hash, .{});
                     stack.push(&value_hash);
                 },
                 Op.OP_HASH160 => {
-                    var buffer: [512]u8 = [_]u8{0} ** 512;
-                    const value = stack.popSafe(&buffer) catch |err| {
-                        if (err == error.OutBufferTooSmall) @panic("Not handling HASH160 for stack items larger than 512 bytes");
+                    var buffer_value: [Stack.MAX_STACK_ELEMENT_SIZE]u8 = undefined;
+                    const value = stack.pop(&buffer_value) catch |err| {
+                        if (err == error.OutBufferTooSmall) @panic("Not handling HASH160 for stack items larger than 520 bytes");
                         return error.BadScript;
                     };
                     var hash160_data: [20]u8 = undefined;
@@ -721,8 +727,10 @@ pub const Script = struct {
                 Op.OP_CHECKSIG => {
                     if (transaction == null) @panic("Trying to execute OP_CHECKSIG with a null transaction");
                     if (input_index == null) @panic("Trying to execute OP_CHECKSIG with a null input_index");
-                    const pubkey: []u8 = stack.pop() catch return error.BadScript;
-                    const signature: []u8 = stack.pop() catch return error.BadScript;
+                    var buffer_pubkey: [Stack.MAX_STACK_ELEMENT_SIZE]u8 = undefined;
+                    var buffer_signature: [Stack.MAX_STACK_ELEMENT_SIZE]u8 = undefined;
+                    const pubkey = try stack.pop(&buffer_pubkey);
+                    const signature = try stack.pop(&buffer_signature);
                     if (try Tx.checksig(transaction.?, input_index.?, pubkey, signature, script)) {
                         stack.push(&[1]u8{1});
                     } else {

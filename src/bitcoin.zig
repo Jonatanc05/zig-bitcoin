@@ -17,10 +17,8 @@ const Cursor = @import("cursor.zig").Cursor;
 pub const Base58 = struct {
     const alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 
-    // @TODO refator to return a []u8 instead
-    /// Returns in what index we can start reading the ouput.
     /// Reads bytes as big endian.
-    pub fn encode(bytes: []const u8, out: []u8) usize {
+    pub fn encode(bytes: []const u8, out: []u8) []u8 {
         if (bytes.len > 128) @panic("Base58.encode: bytes is too large, only up to 128 bytes supported");
         var bytes_extended: [128]u8 = undefined;
         if (bytes.len != 128)
@@ -36,12 +34,11 @@ pub const Base58 = struct {
             out[i] = alphabet[@intCast(remaining % 58)];
             remaining = remaining / 58;
         }
-        return i;
+        return out[i..];
     }
 
-    /// Returns in what index we can start reading the ouput.
     /// Writes out as big endian.
-    pub fn decode(address_str: []const u8, out: *[1024 / 8]u8) usize {
+    pub fn decode(address_str: []const u8, out: *[1024 / 8]u8) []u8 {
         var bytes_as_u1024: u1024 = 0;
         {
             var multiplier: u1024 = 1;
@@ -64,9 +61,9 @@ pub const Base58 = struct {
         while (i > 0) : (i -= 1) {
             out[i - 1] = @as(u8, @truncate(bytes_as_u1024));
             bytes_as_u1024 >>= 8;
-            if (bytes_as_u1024 == 0) return i - 1;
+            if (bytes_as_u1024 == 0) return out[i - 1 ..];
         }
-        return 0;
+        return out[0..];
     }
 };
 
@@ -78,14 +75,12 @@ fn hash160(bytes: []const u8, out: []u8) void {
 }
 
 pub const Address = struct {
-    /// returns index to start reading the ouput
-    pub fn fromPrivkey(privkey: u256, testnet: bool, out: []u8) usize {
+    pub fn fromPrivkey(privkey: u256, testnet: bool, out: []u8) []u8 {
         const pubkey = CryptLib.G.muli(privkey);
         return fromPubkey(pubkey, testnet, out);
     }
 
-    /// returns index to start reading the ouput
-    pub fn fromPubkey(pubkey: EllipticCurveLib.CurvePoint(u256), testnet: bool, out: []u8) usize {
+    pub fn fromPubkey(pubkey: EllipticCurveLib.CurvePoint(u256), testnet: bool, out: []u8) []u8 {
         const hash160_data: [21]u8 = hash160_data: {
             var hash160_data: [21]u8 = undefined;
             var serializedPoint: [33]u8 = undefined;
@@ -108,37 +103,39 @@ pub const Address = struct {
         };
 
         const address = hash160_data ++ checksum;
-        const start = Base58.encode(&address, out[0..]);
-        if (testnet) return start;
-        out[start - 1] = '1';
-        return start - 1;
+        const encoded = Base58.encode(&address, out[0..]);
+        if (testnet) {
+            return encoded;
+        } else {
+            out[out.len - encoded.len - 1] = '1';
+            return out[out.len - encoded.len - 1 ..];
+        }
     }
 
-    /// Returns index to start reading the ouput.
     /// If expect_testnet is not null, it will be checked against the address on Debug builds
     pub fn toPubkey(address: []const u8, expect_testnet: ?bool) []u8 {
         var buffer: [128]u8 = undefined;
-        const start = Base58.decode(address, &buffer);
-        std.debug.assert(buffer.len - start == 1 + 20 + 4); // net_flag + address + checksum
+        const decoded = Base58.decode(address, &buffer);
+        std.debug.assert(decoded.len == 1 + 20 + 4); // net_flag + address + checksum
         if (expect_testnet != null) {
             if (expect_testnet.?) {
-                std.debug.assert(buffer[start] == 0x6f);
+                std.debug.assert(decoded[0] == 0x6f);
             } else {
-                std.debug.assert(buffer[start] == 0x00);
+                std.debug.assert(decoded[0] == 0x00);
             }
         }
         std.debug.assert(std.mem.eql(
             u8,
-            buffer[buffer.len - 4 ..][0..4],
+            decoded[decoded.len - 4 ..][0..4],
             checksum: {
                 var hash1: [32]u8 = undefined;
-                Sha256.hash(buffer[start .. buffer.len - 4], &hash1, .{});
+                Sha256.hash(decoded[0 .. decoded.len - 4], &hash1, .{});
                 var hash2: [32]u8 = undefined;
                 Sha256.hash(&hash1, &hash2, .{});
                 break :checksum hash2[0..4];
             },
         ));
-        return buffer[start + 1 .. buffer.len - 4];
+        return decoded[1 .. decoded.len - 4];
     }
 };
 
@@ -805,34 +802,34 @@ const expect = std.testing.expect;
 test "base58 encoding and decoding" {
     { // array/slice directly
         const u8_array = [8]u8{ 0x00, 0x00, 0x04, 0x09, 0x0a, 0x0f, 0x1a, 0xff };
-        var encoded_u8_array: [10]u8 = undefined;
-        const start = Base58.encode(&u8_array, &encoded_u8_array);
-        try expect(std.mem.eql(u8, encoded_u8_array[start..], "31Yr1PVY"));
+        var buf: [10]u8 = undefined;
+        const encoded_u8_array = Base58.encode(&u8_array, &buf);
+        try expect(std.mem.eql(u8, encoded_u8_array, "31Yr1PVY"));
 
-        var decoded: [128]u8 = undefined;
-        const start_d = Base58.decode(encoded_u8_array[start..], &decoded);
-        try expect(std.mem.eql(u8, decoded[start_d..], u8_array[2..]));
+        var decoding_buffer: [128]u8 = undefined;
+        const decoded = Base58.decode(encoded_u8_array, &decoding_buffer);
+        try expect(std.mem.eql(u8, decoded, u8_array[2..]));
     }
 
     { // number gets written as big endian
         const number: u256 = 0xf45e6907b16670196e487cf667e9fa510f0593276335da22311eb67c90d46421;
         var number_bytes: [32]u8 = undefined;
         std.mem.writeInt(u256, &number_bytes, number, .big);
-        var encoded: [128]u8 = undefined;
-        const start = Base58.encode(&number_bytes, &encoded);
-        try std.testing.expectEqualStrings("HSuyZVztYLpebSGXgjP5vaF4xZFxac8nXQY2m7QGSrVn", encoded[start..]);
+        var buf: [128]u8 = undefined;
+        const encoded = Base58.encode(&number_bytes, &buf);
+        try std.testing.expectEqualStrings("HSuyZVztYLpebSGXgjP5vaF4xZFxac8nXQY2m7QGSrVn", encoded);
 
-        var decoded: [128]u8 = undefined;
-        const start_d = Base58.decode(encoded[start..], &decoded);
-        try expect(std.mem.eql(u8, &number_bytes, decoded[start_d..]));
+        var decoding_buffer: [128]u8 = undefined;
+        const decoded = Base58.decode(encoded, &decoding_buffer);
+        try expect(std.mem.eql(u8, &number_bytes, decoded));
     }
 }
 
 test "btc address" {
     const prvk = 0x5da1cb5b4282e3f5c2314df81a3711fa7f0217401de5f72da0ab4906fab04f4c;
-    var out: [40]u8 = undefined;
-    const start = Address.fromPrivkey(prvk, false, out[0..]);
-    try expect(std.mem.eql(u8, out[start..], "1GHqmiofmT3PgrZDf7fcq632xybfg6onG4"));
+    var buf: [40]u8 = undefined;
+    const address = Address.fromPrivkey(prvk, false, &buf);
+    try expect(std.mem.eql(u8, address, "1GHqmiofmT3PgrZDf7fcq632xybfg6onG4"));
 }
 
 test "parse and serialize p2pkh transaction" {
@@ -931,50 +928,7 @@ test "transaction signing and checksig" {
     const prev_script_pubkey = [_]u8{ 0x76, 0xa9, 0x14, 0xaf, 0x72, 0x4f, 0xc6, 0x1f, 0x4d, 0x5c, 0x4d, 0xb0, 0x6b, 0x33, 0x95, 0xc9, 0xb4, 0x50, 0xa8, 0x0d, 0x25, 0xb6, 0x73, 0x88, 0xac };
     const target_address = "mnvfTUzPbeWBxwxinm37C1bsQ5ckZuN9E7";
 
-    var transaction = Tx{
-        .version = 1,
-        .inputs = try allocator.dupe(Tx.TxInput, &.{
-            .{ .txid = prev_txid, .index = 1, .script_sig = &[_]u8{}, .sequence = 0xfffffffd },
-        }),
-        .outputs = try allocator.dupe(Tx.TxOutput, &outputs: {
-            var outputs = .{
-                .{
-                    .amount = 5000,
-                    .script_pubkey = script_pubkey: {
-                        // @TODO refactor this
-                        var script_pubkey: []u8 = try allocator.alloc(u8, 25);
-                        const Op = Script.Opcode;
-                        script_pubkey[0] = Op.OP_DUP;
-                        script_pubkey[1] = Op.OP_HASH160;
-                        script_pubkey[2] = 0x14;
-                        std.mem.copyForwards(u8, script_pubkey[3..23], pubk_hash: {
-                            var buffer: [128]u8 = undefined;
-                            const start = Base58.decode(target_address, &buffer);
-                            std.debug.assert(buffer.len - start == 1 + 20 + 4); // net_flag + address + checksum
-                            std.debug.assert(buffer[start] == 0x6f); // testnet
-                            std.debug.assert(std.mem.eql(
-                                u8,
-                                buffer[buffer.len - 4 ..][0..4],
-                                checksum: {
-                                    var hash1: [32]u8 = undefined;
-                                    Sha256.hash(buffer[start .. buffer.len - 4], &hash1, .{});
-                                    var hash2: [32]u8 = undefined;
-                                    Sha256.hash(&hash1, &hash2, .{});
-                                    break :checksum hash2[0..4];
-                                },
-                            ));
-                            break :pubk_hash buffer[start + 1 .. buffer.len - 4];
-                        });
-                        script_pubkey[23] = Op.OP_EQUALVERIFY;
-                        script_pubkey[24] = Op.OP_CHECKSIG;
-                        break :script_pubkey script_pubkey;
-                    },
-                },
-            };
-            break :outputs outputs;
-        }),
-        .locktime = 0,
-    };
+    var transaction = try Tx.initP2PKH(true, prev_txid, 1, 5000, target_address);
     defer transaction.deinit();
 
     try transaction.sign(privkey, 0, &prev_script_pubkey);

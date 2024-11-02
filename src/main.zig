@@ -7,9 +7,9 @@ pub fn main() !void {
     const stdout = std.io.getStdOut().writer();
     const stdin = std.io.getStdIn().reader();
     const privkey: u256 = try std.fmt.parseInt(u256, @embedFile(".privkey")[0..64], 16);
-    var address: [40]u8 = undefined;
-    const s = Bitcoin.Address.fromPrivkey(privkey, true, &address);
-    try stdout.print("\nYour address is {s}\n", .{address[s..]});
+    var addr_buf: [40]u8 = undefined;
+    const address = Bitcoin.Address.fromPrivkey(privkey, true, &addr_buf);
+    try stdout.print("\nYour address is {s}\n", .{address});
 
     while (true) {
         try stdout.print("\n################################################\n\nHello dear hodler, tell me what can I do for you\n1. Show me what you got\n2. Sign a transaction\n3. Exit\n\n", .{});

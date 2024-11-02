@@ -96,13 +96,13 @@ pub fn print(privkey: u256) !void {
 
         const u8_array = [_]u8{ 0x00, 0x00, 0x04, 0x09, 0x0a, 0x0f, 0x1a, 0xff };
         stdprint("\nu8_array: {x}\n", .{u8_array});
-        var encoded: [10]u8 = undefined;
-        const start = Bitcoin.Base58.encode(&u8_array, &encoded);
-        stdprint("Base58.encode(u8_array): {s}\n", .{encoded[start..]});
-        var decoded: [128]u8 = undefined;
-        const start_d = Bitcoin.Base58.decode(encoded[start..], &decoded);
-        stdprint("Base58.decode(encoded): {x}\n", .{decoded[start_d..]});
-        stdprint("Decoded equals original: {}\n\n", .{std.mem.eql(u8, decoded[start_d..], u8_array[2..])});
+        var buf: [10]u8 = undefined;
+        const encoded = Bitcoin.Base58.encode(&u8_array, &buf);
+        stdprint("Base58.encode(u8_array): {s}\n", .{encoded});
+        var decoding_buffer: [128]u8 = undefined;
+        const decoded = Bitcoin.Base58.decode(encoded, &decoding_buffer);
+        stdprint("Base58.decode(encoded): {x}\n", .{decoded});
+        stdprint("Decoded equals original: {}\n\n", .{std.mem.eql(u8, decoded, u8_array[2..])});
     }
 
     stdprint("------------ Generating BTC Address ------------\n", .{});
@@ -115,9 +115,9 @@ pub fn print(privkey: u256) !void {
         var serialized_pubk: [33]u8 = undefined;
         pubk.serialize(true, &serialized_pubk);
         stdprint("pubkey (SEC compressed): {x}\n", .{serialized_pubk});
-        var address: [40]u8 = undefined;
-        const start = Bitcoin.Address.fromPubkey(pubk, testnet, address[0..]);
-        stdprint("address: {s}\n", .{address[start..]});
+        var buf: [40]u8 = undefined;
+        const address = Bitcoin.Address.fromPubkey(pubk, testnet, &buf);
+        stdprint("address: {s}\n", .{address});
     }
 
     stdprint("\n------------------- Transactions -------------------\n", .{});

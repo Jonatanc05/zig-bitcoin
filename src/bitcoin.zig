@@ -519,29 +519,29 @@ pub const Script = struct {
             self.push(std.mem.asBytes(&value));
         }
 
-        fn pop(self: *Self, buffer: []u8) PopSafeError![]u8 {
+        fn pop(self: *Self, buffer: []u8) PopError![]u8 {
             if (self.top == 0)
-                return error.EmptyStack;
+                return PopError.EmptyStack;
             self.top -= 1;
             const next_byte = self.data[self.top];
             if (self.data.len < next_byte)
-                return error.Corrupted;
+                return PopError.Corrupted;
             if (next_byte == 0)
                 return &[_]u8{};
             if (next_byte > buffer.len)
-                return error.OutBufferTooSmall;
+                return PopError.OutBufferTooSmall;
             const ret = self.data[self.top - next_byte .. self.top];
             std.mem.copyForwards(u8, buffer[0..next_byte], ret);
             self.top -= next_byte;
             return buffer[0..next_byte];
         }
-        const PopSafeError = error{ EmptyStack, Corrupted, OutBufferTooSmall };
+        const PopError = error{ EmptyStack, Corrupted, OutBufferTooSmall };
 
         fn popInt(self: *Self) PopIntError!Self.Int {
             var buffer_data: [4]u8 = undefined;
             const data = try self.pop(&buffer_data);
             if (data.len > 4) {
-                return error.NotAnOperableInteger;
+                return PopIntError.NotAnOperableInteger;
             } else if (data.len == 4) {
                 const data_as_unsigned = std.mem.readInt(u32, data[0..4], .big);
                 const sign_as_int: Self.Int = if (data_as_unsigned & 0x80000000 != 0) -1 else 1;
@@ -555,7 +555,7 @@ pub const Script = struct {
                 @panic("Not handling this case yet: popping more than 1 but less than 4 bytes");
             }
         }
-        const PopIntError = PopSafeError || error{NotAnOperableInteger};
+        const PopIntError = PopError || error{NotAnOperableInteger};
 
         /// Only false when top value is existent AND not true.
         /// Zero, negative zero and empty array are all treated as false.
@@ -801,6 +801,14 @@ pub const Block = struct {
         Sha256.hash(intermediate_buffer1[0..32], buffer[0..32], .{});
         std.mem.reverse(u8, buffer[0..32]);
     }
+
+    pub fn bitsToTarget(self: *Block) u256 {
+        var as_bytes: [4]u8 = undefined;
+        std.mem.writeInt(u32, &as_bytes, self.bits, .big);
+        const coefficient = std.mem.readInt(u24, as_bytes[0..3], .little);
+        const exponent = as_bytes[3];
+        return @as(u256, coefficient) << (8 * (exponent - 3));
+    }
 };
 
 //#region TESTS #########################################################################
@@ -987,6 +995,12 @@ test "Block hash" {
     var hash: [32]u8 = undefined;
     try block.hash(&hash);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x7e, 0x9e, 0x4c, 0x58, 0x64, 0x39, 0xb0, 0xcd, 0xbe, 0x13, 0xb1, 0x37, 0x0b, 0xdd, 0x94, 0x35, 0xd7, 0x6a, 0x64, 0x4d, 0x04, 0x75, 0x23 }, &hash);
+}
+
+test "bits to target" {
+    const block_raw = [_]u8{ 0x02, 0x00, 0x00, 0x20, 0x8e, 0xc3, 0x94, 0x28, 0xb1, 0x73, 0x23, 0xfa, 0x0d, 0xde, 0xc8, 0xe8, 0x87, 0xb4, 0xa7, 0xc5, 0x3b, 0x8c, 0x0a, 0x0a, 0x22, 0x0c, 0xfd, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x5b, 0x07, 0x50, 0xfc, 0xe0, 0xa8, 0x89, 0x50, 0x2d, 0x40, 0x50, 0x8d, 0x39, 0x57, 0x68, 0x21, 0x15, 0x5e, 0x9c, 0x9e, 0x3f, 0x5c, 0x31, 0x57, 0xf9, 0x61, 0xdb, 0x38, 0xfd, 0x8b, 0x25, 0xbe, 0x1e, 0x77, 0xa7, 0x59, 0xe9, 0x3c, 0x01, 0x18, 0xa4, 0xff, 0xd7, 0x1d };
+    var block = try Block.parse(&block_raw);
+    try expect(block.bitsToTarget() == 0x0000000000000000013ce9000000000000000000000000000000000000000000);
 }
 
 //#endregion

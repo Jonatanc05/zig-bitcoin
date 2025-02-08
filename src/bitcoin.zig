@@ -749,8 +749,8 @@ pub const Script = struct {
         var stack = try Stack.init(scriptSig.len + scriptPubKey.len); // @TODO is this reasonable?
         defer stack.deinit();
 
-        @This().run(scriptSig, &stack, transaction, input_index) catch return false;
-        @This().run(scriptPubKey, &stack, transaction, input_index) catch return false;
+        Script.run(scriptSig, &stack, transaction, input_index) catch return false;
+        Script.run(scriptPubKey, &stack, transaction, input_index) catch return false;
 
         return stack.verify();
     }
@@ -848,68 +848,132 @@ pub const Block = struct {
     }
 };
 
-const Protocol = struct {
+pub const Protocol = struct {
     const magic_mainnet = 0xf9beb4d9;
     const magic_testnet = 0x0b110907;
 
+    /// Union for any message accepted by the Bitcoin protocol and its corresponding payload as data
     pub const Message = union(enum) {
         ping: struct {
             nonce: u64,
+
+            pub fn serialize(self: @This(), writer: std.io.AnyWriter) !void {
+                // length
+                try expect(@sizeOf(@TypeOf(self)) == 8);
+                try writer.writeInt(u32, 8, .little);
+
+                // checksum
+                var hash: [32]u8 = undefined;
+                Sha256.hash(std.mem.asBytes(&self), &hash, .{});
+                Sha256.hash(&hash, &hash, .{});
+                try writer.writeAll(hash[0..4]);
+
+                // payload
+                try writer.writeInt(u64, self.nonce, .big);
+            }
         },
         pong: struct {
             nonce: u64,
+
+            pub fn serialize(self: @This(), writer: std.io.AnyWriter) !void {
+                // length
+                try expect(@sizeOf(@TypeOf(self)) == 8);
+                try writer.writeInt(u32, 8, .little);
+
+                // checksum
+                var hash: [32]u8 = undefined;
+                Sha256.hash(std.mem.asBytes(&self), &hash, .{});
+                Sha256.hash(&hash, &hash, .{});
+                try writer.writeAll(hash[0..4]);
+
+                // payload
+                try writer.writeInt(u64, self.nonce, .big);
+            }
+        },
+        version: struct {
+            version: i32 = 70014,
+            services: u64 = 0,
+            timestamp: i64,
+            receiver_services: u64 = 0,
+            receiver_ip: [16]u8 = [1]u8{0} ** 16,
+            receiver_port: u16 = 8333,
+            sender_services: u64 = 0,
+            sender_ip: [16]u8 = ipv4_as_ipv6([4]u8{ 127, 0, 0, 1 }),
+            sender_port: u16 = 8333,
+            nonce: u64 = 0x1f297b45,
+            user_agent: []const u8 = "Zignode",
+            start_height: i32 = 0,
+            relay: bool = false,
+
+            pub fn serialize(self: @This(), writer: std.io.AnyWriter) !void {
+                var payload_buffer: [256]u8 = undefined;
+                {
+                    var bufstream = std.io.fixedBufferStream(&payload_buffer);
+                    const bufwriter = bufstream.writer();
+                    try bufwriter.writeInt(i32, self.version, .little);
+                    try bufwriter.writeInt(u64, self.services, .little);
+                    try bufwriter.writeInt(i64, self.timestamp, .little);
+
+                    try bufwriter.writeInt(u64, self.receiver_services, .little);
+                    try bufwriter.writeAll(&self.receiver_ip);
+                    try bufwriter.writeInt(u16, self.receiver_port, .big);
+
+                    try bufwriter.writeInt(u64, self.sender_services, .little);
+                    try bufwriter.writeAll(&self.sender_ip);
+                    try bufwriter.writeInt(u16, self.sender_port, .big);
+
+                    try bufwriter.writeInt(u64, self.nonce, .big);
+                    try bufwriter.writeInt(u8, @intCast(self.user_agent.len), .little); // TODO check size bc this is supposed to be a varint
+                    try bufwriter.writeAll(self.user_agent);
+                    try bufwriter.writeInt(i32, self.start_height, .little);
+
+                    try bufwriter.writeInt(u8, if (self.relay) 1 else 0, .big);
+                }
+
+                // length
+                const payload_size = 86 + self.user_agent.len;
+                try writer.writeInt(u32, @intCast(payload_size), .little);
+
+                // checksum
+                var hash: [32]u8 = undefined;
+                Sha256.hash(payload_buffer[0..payload_size], &hash, .{});
+                Sha256.hash(&hash, &hash, .{});
+                try writer.writeAll(hash[0..4]);
+
+                // payload
+                try writer.writeAll(payload_buffer[0..payload_size]);
+            }
         },
 
-        pub fn serialize(self: *const Message, writer: anytype) !void {
-            switch (self.*) {
-                .ping => |ping| {
-                    try writer.writeInt(u32, 8, .little);
-                    var hash: [32]u8 = undefined;
-                    Sha256.hash(std.mem.asBytes(&ping), &hash, .{});
-                    try writer.writeAll(hash[0..4]);
-                    try writer.writeInt(u64, ping.nonce, .big);
-                },
-                .pong => |pong| {
-                    try writer.writeInt(u32, 8, .little);
-                    var hash: [32]u8 = undefined;
-                    Sha256.hash(std.mem.asBytes(&pong), &hash, .{});
-                    try writer.writeAll(hash[0..4]);
-                    try writer.writeInt(u64, pong.nonce, .big);
-                },
-            }
-        }
-    };
-
-    pub const Envelope = struct {
-        testnet: bool,
-        message: *Message,
-
-        pub fn init(testnet: bool, message: Message) !Envelope {
-            const res = Envelope{
-                .testnet = testnet,
-                .message = try allocator.create(Message),
-            };
-            res.message.* = message;
-            return res;
-        }
-
-        pub fn deinit(self: Envelope) void {
-            allocator.free(self.message);
-        }
-
-        pub fn serialize(self: *const Envelope, buffer: []u8) ![]u8 {
+        /// Includes the protocol headers (https://en.bitcoin.it/wiki/Protocol_documentation#Message_structure)
+        pub fn serialize(self: *const Message, buffer: []u8) ![]u8 {
             var stream = std.io.fixedBufferStream(buffer);
             const writer = stream.writer();
-            try writer.writeInt(u32, if (self.testnet) Protocol.magic_testnet else Protocol.magic_mainnet, .big);
+
+            // magic
+            try writer.writeInt(u32, Protocol.magic_mainnet, .big);
+
+            // command
             try writer.writeAll(&command_bytes: {
+                const command = @tagName(self.*);
                 var command_bytes = [_]u8{0} ** 12;
-                std.mem.copyForwards(u8, command_bytes[0..], @tagName(self.message.*));
+                std.mem.copyForwards(u8, command_bytes[0..], command);
                 break :command_bytes command_bytes;
             });
-            try self.message.serialize(writer);
+
+            // payload length, checksum and contents
+            switch (self.*) {
+                .ping => |ping| try ping.serialize(writer.any()),
+                .pong => |pong| try pong.serialize(writer.any()),
+                .version => |version| try version.serialize(writer.any()),
+            }
             return buffer[0..writer.context.pos];
         }
     };
+
+    pub fn ipv4_as_ipv6(ipv4: [4]u8) [16]u8 {
+        return [1]u8{0} ** 10 ++ [2]u8{ 0xff, 0xff } ++ ipv4;
+    }
 };
 
 //#region TESTS #########################################################################
@@ -1115,15 +1179,47 @@ test "block: calculate new bits" {
     try expect(new_bits == 0x308d0118);
 }
 
-test "protocol: envelope serialization" {
-    const version_command = try Protocol.Envelope.init(false, .{ .ping = .{ .nonce = 0x127f } });
+test "protocol: message serialization" {
+    const version_command = Protocol.Message{ .ping = .{ .nonce = 0x127f } };
     var buffer = [_]u8{0} ** 32;
     const res = try version_command.serialize(&buffer);
     try expect(res.len == 32);
     try std.testing.expectEqualSlices(
         u8,
-        &.{ 0xF9, 0xBE, 0xB4, 0xD9, 0x70, 0x69, 0x6E, 0x67, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0xDC, 0xCB, 0xAC, 0x72, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x7F },
+        &.{ 0xF9, 0xBE, 0xB4, 0xD9, 0x70, 0x69, 0x6E, 0x67, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x4E, 0x6E, 0xDE, 0x71, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x7F },
         res,
     );
 }
+
+//// Development test
+//test "protocol: handshake and version" {
+//    const host = "127.0.0.1";
+//    const port = 8333;
+//    const stream = std.net.tcpConnectToHost(allocator, host, port) catch |err| {
+//        std.debug.print("failed to connect to {s}:{d}: {s}\n", .{ host, port, @errorName(err) });
+//        return err;
+//    };
+//    const timestamp = std.time.timestamp();
+//    const message = Protocol.Message{ .version = .{
+//        .timestamp = timestamp,
+//        .receiver_ip = Protocol.ipv4_as_ipv6([4]u8{ 186, 206, 176, 102 }),
+//        .nonce = @intCast(timestamp),
+//        .start_height = 0,
+//    } };
+//    var buffer: [1024]u8 = undefined;
+//    const data = try message.serialize(&buffer);
+//    stream.writeAll(data) catch |err| {
+//        std.debug.print("failed to write to socket at {s}:{d}: {s}\n", .{ host, port, @errorName(err) });
+//        return err;
+//    };
+//    std.debug.print("\nsent {d} bytes: {s}\n", .{ data.len, std.fmt.fmtSliceHexLower(data) });
+//    for (&buffer) |*b| b.* = 0;
+//    const bytes_read_count = stream.read(&buffer) catch |err| {
+//        std.debug.print("failed to read from socket at {s}:{d}: {s}\n", .{ host, port, @errorName(err) });
+//        return err;
+//    };
+//    const bytes_read = buffer[0..bytes_read_count];
+//    std.debug.print("\nreceived {d} bytes: {s}\n", .{ bytes_read.len, std.fmt.fmtSliceHexLower(bytes_read) });
+//    //const message_received = try message.parse(bytes_read);
+//}
 //#endregion

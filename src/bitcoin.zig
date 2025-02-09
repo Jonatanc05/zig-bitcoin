@@ -864,12 +864,45 @@ pub const Protocol = struct {
 
                 // checksum
                 var hash: [32]u8 = undefined;
-                Sha256.hash(std.mem.asBytes(&self), &hash, .{});
+                var nonce_bytes: [8]u8 = undefined;
+                std.mem.writeInt(u64, &nonce_bytes, self.nonce, .little);
+                Sha256.hash(&nonce_bytes, &hash, .{});
                 Sha256.hash(&hash, &hash, .{});
                 try writer.writeAll(hash[0..4]);
 
                 // payload
-                try writer.writeInt(u64, self.nonce, .big);
+                try writer.writeInt(u64, self.nonce, .little);
+            }
+
+            pub fn parse(reader: std.io.AnyReader) !ParseResult {
+                var res = ParseResult{
+                    .value = Message{ .ping = .{ .nonce = undefined } },
+                    .bytes_read_count = 0,
+                };
+
+                const length = try reader.readInt(u32, .little);
+                res.bytes_read_count += 4;
+                assert(length == 8);
+
+                var chcksum: [4]u8 = undefined;
+                assert(try reader.readAll(&chcksum) == 4);
+                res.bytes_read_count += 4;
+
+                const nonce = try reader.readInt(u64, .little);
+                res.value.ping.nonce = nonce;
+                res.bytes_read_count += 8;
+
+                var hash: [32]u8 = undefined;
+                var nonce_bytes: [8]u8 = undefined;
+                std.mem.writeInt(u64, &nonce_bytes, nonce, .little);
+                Sha256.hash(&nonce_bytes, &hash, .{});
+                Sha256.hash(&hash, &hash, .{});
+                const expected_checksum: [4]u8 = hash[0..4].*;
+                if (!std.mem.eql(u8, &chcksum, &expected_checksum)) {
+                    return error.ChecksumMismatch;
+                }
+
+                return res;
             }
         },
         pong: struct {
@@ -882,12 +915,45 @@ pub const Protocol = struct {
 
                 // checksum
                 var hash: [32]u8 = undefined;
-                Sha256.hash(std.mem.asBytes(&self), &hash, .{});
+                var nonce_bytes: [8]u8 = undefined;
+                std.mem.writeInt(u64, &nonce_bytes, self.nonce, .little);
+                Sha256.hash(&nonce_bytes, &hash, .{});
                 Sha256.hash(&hash, &hash, .{});
                 try writer.writeAll(hash[0..4]);
 
                 // payload
-                try writer.writeInt(u64, self.nonce, .big);
+                try writer.writeInt(u64, self.nonce, .little);
+            }
+
+            pub fn parse(reader: std.io.AnyReader) !ParseResult {
+                var res = ParseResult{
+                    .value = Message{ .pong = .{ .nonce = undefined } },
+                    .bytes_read_count = 0,
+                };
+
+                const length = try reader.readInt(u32, .little);
+                res.bytes_read_count += 4;
+                assert(length == 8);
+
+                var chcksum: [4]u8 = undefined;
+                assert(try reader.readAll(&chcksum) == 4);
+                res.bytes_read_count += 4;
+
+                const nonce = try reader.readInt(u64, .little);
+                res.value.pong.nonce = nonce;
+                res.bytes_read_count += 8;
+
+                var hash: [32]u8 = undefined;
+                var nonce_bytes: [8]u8 = undefined;
+                std.mem.writeInt(u64, &nonce_bytes, nonce, .little);
+                Sha256.hash(&nonce_bytes, &hash, .{});
+                Sha256.hash(&hash, &hash, .{});
+                const expected_checksum: [4]u8 = hash[0..4].*;
+                if (!std.mem.eql(u8, &chcksum, &expected_checksum)) {
+                    return error.ChecksumMismatch;
+                }
+
+                return res;
             }
         },
         version: struct {
@@ -922,7 +988,7 @@ pub const Protocol = struct {
                     try bufwriter.writeAll(&self.sender_ip);
                     try bufwriter.writeInt(u16, self.sender_port, .big);
 
-                    try bufwriter.writeInt(u64, self.nonce, .big);
+                    try bufwriter.writeInt(u64, self.nonce, .little);
                     try bufwriter.writeInt(u8, @intCast(self.user_agent.len), .little); // TODO check size bc this is supposed to be a varint
                     try bufwriter.writeAll(self.user_agent);
                     try bufwriter.writeInt(i32, self.start_height, .little);
@@ -942,6 +1008,83 @@ pub const Protocol = struct {
 
                 // payload
                 try writer.writeAll(payload_buffer[0..payload_size]);
+            }
+
+            pub fn parse(reader: std.io.AnyReader) !ParseResult {
+                var res = ParseResult{
+                    .value = Message{ .version = .{ .timestamp = 0 } },
+                    .bytes_read_count = 0,
+                };
+
+                const length = try reader.readInt(u32, .little);
+                _ = length;
+                res.bytes_read_count += 4;
+
+                var chcksum: [4]u8 = undefined;
+                assert(try reader.readAll(&chcksum) == 4);
+                res.bytes_read_count += 4;
+
+                var out = &res.value.version;
+
+                out.version = try reader.readInt(i32, .little);
+                res.bytes_read_count += 4;
+                out.services = try reader.readInt(u64, .little);
+                out.timestamp = try reader.readInt(i64, .little);
+                res.bytes_read_count += 8 * 2;
+
+                out.receiver_services = try reader.readInt(u64, .little);
+                res.bytes_read_count += 8;
+                res.bytes_read_count += @intCast(try reader.readAll(&out.receiver_ip));
+                out.receiver_port = try reader.readInt(u16, .little);
+                res.bytes_read_count += 2;
+
+                out.sender_services = try reader.readInt(u64, .little);
+                res.bytes_read_count += 8;
+                res.bytes_read_count += @intCast(try reader.readAll(&out.sender_ip));
+                out.sender_port = try reader.readInt(u16, .little);
+                res.bytes_read_count += 2;
+
+                out.nonce = try reader.readInt(u64, .little);
+                res.bytes_read_count += 8;
+
+                const user_agent_len = try reader.readInt(u8, .little);
+                res.bytes_read_count += 1;
+
+                var buffer: [256]u8 = undefined;
+                assert((try reader.readAll(buffer[0..user_agent_len])) == user_agent_len);
+                out.user_agent = try allocator.dupe(u8, buffer[0..user_agent_len]);
+                res.bytes_read_count += user_agent_len;
+
+                out.start_height = try reader.readInt(i32, .little);
+                res.bytes_read_count += 4;
+                out.relay = (try reader.readInt(u8, .little)) > 0;
+                res.bytes_read_count += 1;
+
+                // TODO checksum validation
+                //var hash: [32]u8 = undefined;
+                //const bytes_ptr = @as([*]u8, @ptrCast(@alignCast(std.mem.asBytes(&out))));
+
+                //Sha256.hash(bytes_ptr[0..@sizeOf(@TypeOf(out.*))], &hash, .{});
+                //Sha256.hash(&hash, &hash, .{});
+                //const expected_checksum: [4]u8 = hash[0..4].*;
+                //if (!std.mem.eql(u8, &chcksum, &expected_checksum)) {
+                //    return error.ChecksumMismatch;
+                //}
+
+                return res;
+            }
+        },
+        verack: struct {
+            pub fn serialize(self: @This(), writer: std.io.AnyWriter) !void {
+                _ = self;
+                const serialized = [_]u8{ 0xf9, 0xbe, 0xb4, 0xd9, 0x76, 0x65, 0x72, 0x61, 0x63, 0x6b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x5d, 0xf6, 0xe0, 0xe2 };
+                try writer.writeAll(&serialized);
+            }
+
+            pub fn parse(reader: std.io.AnyReader) !ParseResult {
+                assert(try reader.readInt(u32, .little) == 0);
+                assert(try reader.readInt(u32, .big) == 0x5df6e0e2);
+                return .{ .value = .{ .verack = .{} }, .bytes_read_count = 8 };
             }
         },
 
@@ -963,16 +1106,78 @@ pub const Protocol = struct {
 
             // payload length, checksum and contents
             switch (self.*) {
-                .ping => |ping| try ping.serialize(writer.any()),
-                .pong => |pong| try pong.serialize(writer.any()),
-                .version => |version| try version.serialize(writer.any()),
+                //.ping => |ping| try ping.serialize(writer.any()),
+                //.pong => |pong| try pong.serialize(writer.any()),
+                //.version => |version| try version.serialize(writer.any()),
+                inline else => |field| try field.serialize(writer.any()),
             }
             return buffer[0..writer.context.pos];
+        }
+
+        const ParseResult = struct { value: Message, bytes_read_count: u32 };
+        pub fn parse(bytes: []u8) !ParseResult {
+            var strm = std.io.fixedBufferStream(bytes);
+            var reader = strm.reader();
+            var res: ParseResult = .{
+                .value = undefined,
+                .bytes_read_count = 0,
+            };
+
+            const magic = try reader.readInt(u32, .big);
+            res.bytes_read_count += 4;
+            if (magic != magic_mainnet and magic != magic_testnet) // might try to assert the magic read and the current context in the future
+                return error.MagicNumberExpected;
+
+            var command: [12]u8 = [_]u8{0} ** 12;
+            assert(try reader.readAll(&command) == 12);
+            res.bytes_read_count += 12;
+
+            // Trying to make a generic code
+            //const first_zero_index: usize = for (command, 0..) |c, i| {
+            //    if (c == 0) break i;
+            //} else 12;
+            //const tagName = command[0..first_zero_index];
+            //const MessageTagsEnum = std.meta.FieldEnum(Message);
+            //const tag = std.meta.stringToEnum(MessageTagsEnum, tagName);
+            //if (tag == null) return error.MessageTypeNotImplemented;
+            //// In version 0.14 std.meta.FieldType will become @FieldType
+            //std.meta.declList
+            //res.value = try std.meta.FieldType(Message, tag.?).parse(reader.any());
+
+            assert(res.bytes_read_count == 16);
+            const eql = std.mem.eql;
+            if (eql(u8, command[0..8], "version\x00")) {
+                // In version 0.14 std.meta.FieldType will become @FieldType
+                const version_res = try std.meta.FieldType(Message, Message.version).parse(reader.any());
+                res.value = version_res.value;
+                res.bytes_read_count += version_res.bytes_read_count;
+            } else if (eql(u8, command[0..7], "verack\x00")) {
+                const version_res = try std.meta.FieldType(Message, Message.verack).parse(reader.any());
+                res.value = version_res.value;
+                res.bytes_read_count += version_res.bytes_read_count;
+            } else if (eql(u8, command[0..5], "ping\x00")) {
+                const ping_res = try std.meta.FieldType(Message, Message.ping).parse(reader.any());
+                res.value = ping_res.value;
+                res.bytes_read_count += ping_res.bytes_read_count;
+            } else if (eql(u8, command[0..5], "pong\x00")) {
+                const pong_res = try std.meta.FieldType(Message, Message.pong).parse(reader.any());
+                res.value = pong_res.value;
+                res.bytes_read_count += pong_res.bytes_read_count;
+            }
+
+            return res;
         }
     };
 
     pub fn ipv4_as_ipv6(ipv4: [4]u8) [16]u8 {
         return [1]u8{0} ** 10 ++ [2]u8{ 0xff, 0xff } ++ ipv4;
+    }
+
+    pub fn checksum(bytes: []u8) [4]u8 {
+        var hash: [32]u8 = undefined;
+        Sha256.hash(bytes, &hash, .{});
+        Sha256.hash(&hash, &hash, .{});
+        return hash[0..4];
     }
 };
 
@@ -1180,46 +1385,66 @@ test "block: calculate new bits" {
 }
 
 test "protocol: message serialization" {
-    const version_command = Protocol.Message{ .ping = .{ .nonce = 0x127f } };
+    const message = Protocol.Message{ .ping = .{ .nonce = 0x127f } };
     var buffer = [_]u8{0} ** 32;
-    const res = try version_command.serialize(&buffer);
+    const res = try message.serialize(&buffer);
     try expect(res.len == 32);
     try std.testing.expectEqualSlices(
         u8,
-        &.{ 0xF9, 0xBE, 0xB4, 0xD9, 0x70, 0x69, 0x6E, 0x67, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x4E, 0x6E, 0xDE, 0x71, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x7F },
+        &.{ 0xF9, 0xBE, 0xB4, 0xD9, 0x70, 0x69, 0x6E, 0x67, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x4E, 0x6E, 0xDE, 0x71, 0x7f, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },
         res,
+    );
+
+    const parsed_res = (try Protocol.Message.parse(res)).value;
+    var buffer2 = [_]u8{0} ** 32;
+    const serialized_parsed_res = try parsed_res.serialize(&buffer2);
+
+    try std.testing.expectEqualSlices(
+        u8,
+        res,
+        serialized_parsed_res,
     );
 }
 
-//// Development test
-//test "protocol: handshake and version" {
-//    const host = "127.0.0.1";
-//    const port = 8333;
-//    const stream = std.net.tcpConnectToHost(allocator, host, port) catch |err| {
-//        std.debug.print("failed to connect to {s}:{d}: {s}\n", .{ host, port, @errorName(err) });
-//        return err;
-//    };
-//    const timestamp = std.time.timestamp();
-//    const message = Protocol.Message{ .version = .{
-//        .timestamp = timestamp,
-//        .receiver_ip = Protocol.ipv4_as_ipv6([4]u8{ 186, 206, 176, 102 }),
-//        .nonce = @intCast(timestamp),
-//        .start_height = 0,
-//    } };
-//    var buffer: [1024]u8 = undefined;
-//    const data = try message.serialize(&buffer);
-//    stream.writeAll(data) catch |err| {
-//        std.debug.print("failed to write to socket at {s}:{d}: {s}\n", .{ host, port, @errorName(err) });
-//        return err;
-//    };
-//    std.debug.print("\nsent {d} bytes: {s}\n", .{ data.len, std.fmt.fmtSliceHexLower(data) });
-//    for (&buffer) |*b| b.* = 0;
-//    const bytes_read_count = stream.read(&buffer) catch |err| {
-//        std.debug.print("failed to read from socket at {s}:{d}: {s}\n", .{ host, port, @errorName(err) });
-//        return err;
-//    };
-//    const bytes_read = buffer[0..bytes_read_count];
-//    std.debug.print("\nreceived {d} bytes: {s}\n", .{ bytes_read.len, std.fmt.fmtSliceHexLower(bytes_read) });
-//    //const message_received = try message.parse(bytes_read);
-//}
+test "protocol: handshake and version" {
+    const host = "87.98.244.250";
+    const port = 8333;
+    const stream = std.net.tcpConnectToHost(allocator, host, port) catch |err| {
+        std.debug.print("failed to connect to {s}:{d}: {s}\n", .{ host, port, @errorName(err) });
+        return err;
+    };
+    const timestamp = std.time.timestamp();
+    const message = Protocol.Message{ .version = .{
+        .timestamp = timestamp,
+        .nonce = @intCast(timestamp),
+        .start_height = 0,
+    } };
+    var buffer: [1024]u8 = undefined;
+    const data = try message.serialize(&buffer);
+    stream.writeAll(data) catch |err| {
+        std.debug.print("failed to write to socket at {s}:{d}: {s}\n", .{ host, port, @errorName(err) });
+        return err;
+    };
+    std.debug.print("\nsent {d} bytes (version): {s}\n", .{ data.len, std.fmt.fmtSliceHexLower(data) });
+    buffer = [1]u8{0} ** 1024;
+    //buffer = [_]u8{ 0xf9, 0xbe, 0xb4, 0xd9, 0x76, 0x65, 0x72, 0x73, 0x69, 0x6f, 0x6e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x66, 0x00, 0x00, 0x00, 0xb9, 0x7b, 0x2a, 0xbb, 0x80, 0x11, 0x01, 0x00, 0x0d, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x6e, 0xf0, 0xa7, 0x67, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xba, 0xce, 0xb0, 0x66, 0xd1, 0x86, 0x0d, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1f, 0x40, 0x12, 0xf7, 0x95, 0xb6, 0x6f, 0x06, 0x10, 0x2f, 0x53, 0x61, 0x74, 0x6f, 0x73, 0x68, 0x69, 0x3a, 0x32, 0x36, 0x2e, 0x31, 0x2e, 0x30, 0x2f, 0x09, 0x79, 0x0d, 0x00, 0x01, 0xf9, 0xbe, 0xb4, 0xd9, 0x76, 0x65, 0x72, 0x61, 0x63, 0x6b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x5d, 0xf6, 0xe0, 0xe2 } ++ [1]u8{0} ** (1024 - 150);
+    //const bytes_read_count = 150;
+    const bytes_read_count = stream.read(&buffer) catch |err| {
+        std.debug.print("failed to read from socket at {s}:{d}: {s}\n", .{ host, port, @errorName(err) });
+        return err;
+    };
+    const bytes_read = buffer[0..bytes_read_count];
+    std.debug.print("\nreceived {d} bytes: {s}\n", .{ bytes_read.len, std.fmt.fmtSliceHexLower(bytes_read) });
+
+    var bytes_parsed_count: u32 = 0;
+    while (bytes_parsed_count < bytes_read_count) {
+        std.debug.print("parsed {} so far\n", .{bytes_parsed_count});
+        const result = try Protocol.Message.parse(bytes_read[bytes_parsed_count..]);
+        const message_received = result.value;
+        std.debug.print("\n\nMessage received: {any}\n\n", .{message_received});
+
+        bytes_parsed_count += result.bytes_read_count;
+    }
+    std.debug.print("parsed {} bytes out of {}\n", .{ bytes_parsed_count, bytes_read_count });
+}
 //#endregion

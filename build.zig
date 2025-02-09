@@ -14,13 +14,11 @@ pub fn build(b: *std.Build) void {
 
     const exe = b.addExecutable(.{
         .name = "zig-bitcoin",
-        .root_source_file = .{ .path = "src/main.zig" },
+        .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
     });
-    exe.addIncludePath(.{
-        .path = "include",
-    });
+    exe.addIncludePath(b.path("include"));
 
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default
@@ -61,11 +59,11 @@ pub fn build(b: *std.Build) void {
 
     for (files) |file| {
         const t = b.addTest(.{
-            .root_source_file = .{ .path = file },
+            .root_source_file = b.path(file),
             .target = target,
             .optimize = optimize,
         });
-        t.root_module.addIncludePath(.{ .path = ("include") });
+        t.root_module.addIncludePath(b.path("include"));
         const test_artifact = b.addRunArtifact(t);
         test_step.dependOn(&test_artifact.step);
     }

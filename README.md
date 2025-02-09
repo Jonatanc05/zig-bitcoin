@@ -11,7 +11,7 @@ I have some devlogs on https://publish.obsidian.md/jonata/notes/learn/Bitcoin/zi
 
 ## Requirements
 
-Currently building with Zig 0.12.0
+Currently building with Zig 0.14.0-dev.3091+42e48b83b 
 
 Windows 11 and Ubuntu WSL are usually tested.
 

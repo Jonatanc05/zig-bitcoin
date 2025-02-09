@@ -3,8 +3,8 @@ const assert = std.debug.assert;
 const expect = @import("std").testing.expect;
 
 pub fn FieldElement(comptime NumberType: type) type {
-    const SumExtendedNumberType = @Type(std.builtin.Type{ .Int = .{ .signedness = .unsigned, .bits = @typeInfo(NumberType).Int.bits + 1 } });
-    const MulExtendedNumberType = @Type(std.builtin.Type{ .Int = .{ .signedness = .unsigned, .bits = @typeInfo(NumberType).Int.bits * 2 } });
+    const SumExtendedNumberType = @Type(std.builtin.Type{ .int = .{ .signedness = .unsigned, .bits = @typeInfo(NumberType).int.bits + 1 } });
+    const MulExtendedNumberType = @Type(std.builtin.Type{ .int = .{ .signedness = .unsigned, .bits = @typeInfo(NumberType).int.bits * 2 } });
     return struct {
         value: NumberType,
         prime: NumberType,

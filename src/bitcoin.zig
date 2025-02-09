@@ -164,7 +164,7 @@ pub const Tx = struct {
                 .{ .txid = prev_txid, .index = prev_output_index, .script_sig = &[_]u8{}, .sequence = 0xfffffffd },
             }),
             .outputs = try allocator.dupe(TxOutput, &outputs: {
-                var outputs = .{
+                var outputs: [1]TxOutput = .{
                     .{
                         .amount = amount,
                         .script_pubkey = script_pubkey: {
@@ -614,7 +614,7 @@ pub const Script = struct {
             const values_supported = comptime res: {
                 var res = [_]u8{0} ** 60;
                 var next: usize = 0;
-                for (@typeInfo(Opcode).Struct.decls) |decl| {
+                for (@typeInfo(Opcode).@"struct".decls) |decl| {
                     const value = @field(Opcode, decl.name);
                     if (@TypeOf(value) != u8) continue;
                     res[next] = value;
@@ -1406,45 +1406,45 @@ test "protocol: message serialization" {
     );
 }
 
-test "protocol: handshake and version" {
-    const host = "87.98.244.250";
-    const port = 8333;
-    const stream = std.net.tcpConnectToHost(allocator, host, port) catch |err| {
-        std.debug.print("failed to connect to {s}:{d}: {s}\n", .{ host, port, @errorName(err) });
-        return err;
-    };
-    const timestamp = std.time.timestamp();
-    const message = Protocol.Message{ .version = .{
-        .timestamp = timestamp,
-        .nonce = @intCast(timestamp),
-        .start_height = 0,
-    } };
-    var buffer: [1024]u8 = undefined;
-    const data = try message.serialize(&buffer);
-    stream.writeAll(data) catch |err| {
-        std.debug.print("failed to write to socket at {s}:{d}: {s}\n", .{ host, port, @errorName(err) });
-        return err;
-    };
-    std.debug.print("\nsent {d} bytes (version): {s}\n", .{ data.len, std.fmt.fmtSliceHexLower(data) });
-    buffer = [1]u8{0} ** 1024;
-    //buffer = [_]u8{ 0xf9, 0xbe, 0xb4, 0xd9, 0x76, 0x65, 0x72, 0x73, 0x69, 0x6f, 0x6e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x66, 0x00, 0x00, 0x00, 0xb9, 0x7b, 0x2a, 0xbb, 0x80, 0x11, 0x01, 0x00, 0x0d, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x6e, 0xf0, 0xa7, 0x67, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xba, 0xce, 0xb0, 0x66, 0xd1, 0x86, 0x0d, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1f, 0x40, 0x12, 0xf7, 0x95, 0xb6, 0x6f, 0x06, 0x10, 0x2f, 0x53, 0x61, 0x74, 0x6f, 0x73, 0x68, 0x69, 0x3a, 0x32, 0x36, 0x2e, 0x31, 0x2e, 0x30, 0x2f, 0x09, 0x79, 0x0d, 0x00, 0x01, 0xf9, 0xbe, 0xb4, 0xd9, 0x76, 0x65, 0x72, 0x61, 0x63, 0x6b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x5d, 0xf6, 0xe0, 0xe2 } ++ [1]u8{0} ** (1024 - 150);
-    //const bytes_read_count = 150;
-    const bytes_read_count = stream.read(&buffer) catch |err| {
-        std.debug.print("failed to read from socket at {s}:{d}: {s}\n", .{ host, port, @errorName(err) });
-        return err;
-    };
-    const bytes_read = buffer[0..bytes_read_count];
-    std.debug.print("\nreceived {d} bytes: {s}\n", .{ bytes_read.len, std.fmt.fmtSliceHexLower(bytes_read) });
-
-    var bytes_parsed_count: u32 = 0;
-    while (bytes_parsed_count < bytes_read_count) {
-        std.debug.print("parsed {} so far\n", .{bytes_parsed_count});
-        const result = try Protocol.Message.parse(bytes_read[bytes_parsed_count..]);
-        const message_received = result.value;
-        std.debug.print("\n\nMessage received: {any}\n\n", .{message_received});
-
-        bytes_parsed_count += result.bytes_read_count;
-    }
-    std.debug.print("parsed {} bytes out of {}\n", .{ bytes_parsed_count, bytes_read_count });
-}
+//test "protocol: handshake and version" {
+//    const host = "87.98.244.250";
+//    const port = 8333;
+//    const stream = std.net.tcpConnectToHost(allocator, host, port) catch |err| {
+//        std.debug.print("failed to connect to {s}:{d}: {s}\n", .{ host, port, @errorName(err) });
+//        return err;
+//    };
+//    const timestamp = std.time.timestamp();
+//    const message = Protocol.Message{ .version = .{
+//        .timestamp = timestamp,
+//        .nonce = @intCast(timestamp),
+//        .start_height = 0,
+//    } };
+//    var buffer: [1024]u8 = undefined;
+//    const data = try message.serialize(&buffer);
+//    stream.writeAll(data) catch |err| {
+//        std.debug.print("failed to write to socket at {s}:{d}: {s}\n", .{ host, port, @errorName(err) });
+//        return err;
+//    };
+//    std.debug.print("\nsent {d} bytes (version): {s}\n", .{ data.len, std.fmt.fmtSliceHexLower(data) });
+//    buffer = [1]u8{0} ** 1024;
+//    //buffer = [_]u8{ 0xf9, 0xbe, 0xb4, 0xd9, 0x76, 0x65, 0x72, 0x73, 0x69, 0x6f, 0x6e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x66, 0x00, 0x00, 0x00, 0xb9, 0x7b, 0x2a, 0xbb, 0x80, 0x11, 0x01, 0x00, 0x0d, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x6e, 0xf0, 0xa7, 0x67, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xba, 0xce, 0xb0, 0x66, 0xd1, 0x86, 0x0d, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1f, 0x40, 0x12, 0xf7, 0x95, 0xb6, 0x6f, 0x06, 0x10, 0x2f, 0x53, 0x61, 0x74, 0x6f, 0x73, 0x68, 0x69, 0x3a, 0x32, 0x36, 0x2e, 0x31, 0x2e, 0x30, 0x2f, 0x09, 0x79, 0x0d, 0x00, 0x01, 0xf9, 0xbe, 0xb4, 0xd9, 0x76, 0x65, 0x72, 0x61, 0x63, 0x6b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x5d, 0xf6, 0xe0, 0xe2 } ++ [1]u8{0} ** (1024 - 150);
+//    //const bytes_read_count = 150;
+//    const bytes_read_count = stream.read(&buffer) catch |err| {
+//        std.debug.print("failed to read from socket at {s}:{d}: {s}\n", .{ host, port, @errorName(err) });
+//        return err;
+//    };
+//    const bytes_read = buffer[0..bytes_read_count];
+//    std.debug.print("\nreceived {d} bytes: {s}\n", .{ bytes_read.len, std.fmt.fmtSliceHexLower(bytes_read) });
+//
+//    var bytes_parsed_count: u32 = 0;
+//    while (bytes_parsed_count < bytes_read_count) {
+//        std.debug.print("parsed {} so far\n", .{bytes_parsed_count});
+//        const result = try Protocol.Message.parse(bytes_read[bytes_parsed_count..]);
+//        const message_received = result.value;
+//        std.debug.print("\n\nMessage received: {any}\n\n", .{message_received});
+//
+//        bytes_parsed_count += result.bytes_read_count;
+//    }
+//    std.debug.print("parsed {} bytes out of {}\n", .{ bytes_parsed_count, bytes_read_count });
+//}
 //#endregion

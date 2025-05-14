@@ -2,7 +2,7 @@
 #### A Bitcoin client with minimal dependencies written in Zig
 
 - I was recently hyped about [handmade software](https://handmade.network/)
-- I was recently hyped about [Bitcoin](https://www.reddit.com/r/Bitcoin/comments/1bg5lv0/bitcoin_newcomers_faq_please_read/)
+- I was recently hyped about [Bitcoin](https://btcmaxis.com/)
 - I was recently hyped about [Zig](https://ziglang.org/)
 
 So I'm following [Jimmy Song's book](https://duckduckgo.com/?q=programming+bitcoin+jimmy+song&t=newext&atb=v407-1&ia=web) to have some hands-on experience with these topics. Note that it's a learning project not meant for any real use, although I would like to use it some day.

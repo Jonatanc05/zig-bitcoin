@@ -55,6 +55,7 @@ pub fn build(b: *std.Build) void {
         "src/elliptic-curve.zig",
         "src/cryptography.zig",
         "src/bitcoin.zig",
+        "src/protocol.zig",
     };
 
     for (files) |file| {

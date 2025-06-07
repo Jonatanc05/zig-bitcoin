@@ -25,7 +25,6 @@ pub const Cursor = struct {
     }
 
     pub fn readInt(self: *Cursor, comptime T: type, comptime endian: std.builtin.Endian) T {
-        comptime assert(@typeInfo(T).int.signedness == .unsigned);
         self.assertCanRead(@sizeOf(T));
         const n_bytes = @divExact(@typeInfo(T).int.bits, 8);
         const ret = std.mem.readInt(T, self.data[self.index..][0..n_bytes], endian);

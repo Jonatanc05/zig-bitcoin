@@ -1,5 +1,5 @@
-// std
 const std = @import("std");
+const net = std.net;
 const assert = std.debug.assert;
 var allocator = std.heap.page_allocator;
 const Sha256 = std.crypto.hash.sha2.Sha256;
@@ -15,6 +15,8 @@ fn ipv4_as_ipv6(ipv4: [4]u8) [16]u8 {
 }
 
 pub const Protocol = struct {
+    pub const current_version = 70014;
+
     const magic_mainnet = 0xf9beb4d9;
     const magic_testnet = 0x0b110907;
 
@@ -126,7 +128,8 @@ pub const Protocol = struct {
             }
         },
         version: struct {
-            version: i32 = 70014,
+            version: i32 = current_version,
+            // @TODO make it BIP159 compliant (https://github.com/bitcoin/bips/blob/master/bip-0159.mediawiki)
             services: u64 = 0,
             timestamp: i64,
             receiver_services: u64 = 0,
@@ -371,9 +374,9 @@ pub const Protocol = struct {
                 if (c == 0) break i;
             } else 12;
             const tagName = command[0..first_zero_index];
-            inline for (@typeInfo(Message).@"union".fields) |f| {
-                if (std.mem.eql(u8, f.name, tagName)) {
-                    const version_res = try f.type.parse(bytes[res.bytes_read_count..]);
+            inline for (@typeInfo(Message).@"union".fields) |field| {
+                if (std.mem.eql(u8, field.name, tagName)) {
+                    const version_res = try field.type.parse(bytes[res.bytes_read_count..]);
                     res.value = version_res.value;
                     res.bytes_read_count += version_res.bytes_read_count;
                 }
@@ -388,6 +391,104 @@ pub const Protocol = struct {
         Sha256.hash(bytes, &hash, .{});
         Sha256.hash(&hash, &hash, .{});
         return hash[0..4];
+    }
+};
+
+pub const Node = struct {
+    pub const Connection = struct {
+        peer_address: net.Address,
+        stream: net.Stream,
+        handshaked: bool,
+        user_agent: [30]u8,
+    };
+
+    pub fn connect(address: net.Address) !Connection {
+        const stream = net.tcpConnectToAddress(address) catch |err| {
+            std.debug.print("Failed to connect to {}: {s}\n", .{ address, @errorName(err) });
+            return error.ConnectionError;
+        };
+        var connection = Connection {
+            .peer_address = address,
+            .stream = stream,
+            .handshaked = false,
+            .user_agent = undefined,
+        };
+
+        // Start handshake
+        const timestamp = std.time.timestamp();
+        try Node.sendMessage(connection, .{
+            .version = .{
+                .timestamp = timestamp,
+                .nonce = @intCast(timestamp),
+                .start_height = 0,
+            },
+        });
+
+        // Read answer
+        // @TODO leaking memory rn, deinit messages later
+        var received: [2]Protocol.Message = undefined;
+        received[0] = try Node.readMessage(connection);
+        received[1] = try Node.readMessage(connection);
+
+        // Information to obtain
+        var verack_received: bool = false;
+        var version_received: bool = false;
+        var user_agent_received: [30]u8 = [1]u8{'.'} ++ [1]u8{' '}**29;
+        for (received) |msg| {
+            switch (msg) {
+                Protocol.Message.version => |v_msg| {
+                    if (v_msg.version < Protocol.current_version)
+                        return error.VersionMismatch;
+                    for (v_msg.user_agent, 0..) |ch, i| {
+                        if (i > user_agent_received.len) break;
+                        user_agent_received[i] = ch;
+                    }
+                    version_received = true;
+                },
+                Protocol.Message.verack => verack_received = true,
+                else => return error.UnexpectedMessageOnHandshake,
+            }
+        }
+
+        if (version_received and verack_received) {
+            connection.handshaked = true;
+            connection.user_agent = user_agent_received;
+            return connection;
+        }
+
+        return error.HandshakeFailed;
+    }
+
+    pub fn sendMessage(connection: Node.Connection, message: Protocol.Message) !void {
+        var buffer: [1024]u8 = undefined;
+        const data = try message.serialize(&buffer);
+        connection.stream.writeAll(data) catch |err| {
+            std.debug.print("Failed to write to socket at {any}: {s}\n", .{ connection.peer_address, @errorName(err) });
+            return error.SendError;
+        };
+    }
+
+    /// Synchronously waits to receive bytes
+    pub fn readMessage(connection: Connection) !Protocol.Message {
+        const header_len = 24;
+        var buffer = ([1]u8{0} ** header_len) ++ ([1]u8{0} ** (1024*256));
+        var header_slice = buffer[0..header_len];
+
+        const read_count1 = connection.stream.readAtLeast(header_slice, header_len) catch |err| {
+            std.debug.print("Failed to read from socket at {any}: {s}\n", .{ connection.peer_address, @errorName(err) });
+            return error.ReceiveError;
+        };
+        if (read_count1 < header_len) return error.ReceiveError;
+        const payload_length = std.mem.readInt(u32, header_slice[16..][0..4], .little);
+
+        const read_count2 = connection.stream.readAtLeast(buffer[header_len..][0..payload_length], payload_length) catch |err| {
+            std.debug.print("Failed to read from socket at {any}: {s}\n", .{ connection.peer_address, @errorName(err) });
+            return error.ReceiveError;
+        };
+        if (read_count2 < payload_length) return error.ReceiveError;
+
+        const result = Protocol.Message.parse(buffer[0..]) catch return error.PayloadParseError;
+        return result.value;
     }
 };
 
@@ -418,53 +519,20 @@ test "protocol: message serialization" {
 }
 
 test "protocol: handshake and version" {
-    // Turn this on to see logs printed to stderr (this causes test to fail)
-    const debug_log = false;
     //const host = "58.96.123.120"; // from bitcoin core's nodes_main.txt
     const host = "74.220.255.190"; // from bitcoin core's nodes_main.txt
+    //const host = "77.173.132.140"; // from bitcoin core's nodes_main.txt
     const port = 8333;
-    const stream = std.net.tcpConnectToHost(allocator, host, port) catch |err| {
-        std.debug.print("failed to connect to {s}:{d}: {s}\n", .{ host, port, @errorName(err) });
-        return err;
+    const address = try net.Address.resolveIp(host, port);
+    _ = Node.connect(address) catch |err| switch (err) {
+        error.ConnectionError,
+        error.SendError,
+        error.ReceiveError,
+        error.HandshakeFailed,
+        error.UnexpectedMessageOnHandshake,
+        error.VersionMismatch => return std.debug.print("failed to connect: {s}\n", .{ @errorName(err) }),
+        else => return err,
     };
-    const timestamp = std.time.timestamp();
-    const message = Protocol.Message{ .version = .{
-        .timestamp = timestamp,
-        .nonce = @intCast(timestamp),
-        .start_height = 0,
-    } };
-    var buffer: [1024]u8 = undefined;
-    const data = try message.serialize(&buffer);
-    stream.writeAll(data) catch |err| {
-        std.debug.print("failed to write to socket at {s}:{d}: {s}\n", .{ host, port, @errorName(err) });
-        return err;
-    };
-    if (debug_log)
-        std.debug.print("\nsent {d} bytes (version): {s}\n", .{ data.len, std.fmt.fmtSliceHexLower(data) });
-    buffer = [1]u8{0} ** 1024;
-    //buffer = [_]u8{ 0xf9, 0xbe, 0xb4, 0xd9, 0x76, 0x65, 0x72, 0x73, 0x69, 0x6f, 0x6e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x66, 0x00, 0x00, 0x00, 0xb9, 0x7b, 0x2a, 0xbb, 0x80, 0x11, 0x01, 0x00, 0x0d, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x6e, 0xf0, 0xa7, 0x67, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xba, 0xce, 0xb0, 0x66, 0xd1, 0x86, 0x0d, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1f, 0x40, 0x12, 0xf7, 0x95, 0xb6, 0x6f, 0x06, 0x10, 0x2f, 0x53, 0x61, 0x74, 0x6f, 0x73, 0x68, 0x69, 0x3a, 0x32, 0x36, 0x2e, 0x31, 0x2e, 0x30, 0x2f, 0x09, 0x79, 0x0d, 0x00, 0x01, 0xf9, 0xbe, 0xb4, 0xd9, 0x76, 0x65, 0x72, 0x61, 0x63, 0x6b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x5d, 0xf6, 0xe0, 0xe2 } ++ [1]u8{0} ** (1024 - 150);
-    //const bytes_read_count = 150;
-    const bytes_read_count = stream.read(&buffer) catch |err| {
-        std.debug.print("failed to read from socket at {s}:{d}: {s}\n", .{ host, port, @errorName(err) });
-        return err;
-    };
-    const bytes_read = buffer[0..bytes_read_count];
-    if (debug_log)
-        std.debug.print("\nreceived {d} bytes: {s}\n", .{ bytes_read.len, std.fmt.fmtSliceHexLower(bytes_read) });
-
-    var bytes_parsed_count: u32 = 0;
-    while (bytes_parsed_count < bytes_read_count) {
-        if (debug_log)
-            std.debug.print("parsed {} so far\n", .{bytes_parsed_count});
-        const result = try Protocol.Message.parse(bytes_read[bytes_parsed_count..]);
-        const message_received = result.value;
-        if (debug_log)
-            std.debug.print("\n\nMessage received: {any}\n\n", .{message_received});
-
-        bytes_parsed_count += result.bytes_read_count;
-    }
-    if (debug_log)
-        std.debug.print("parsed {} bytes out of {}\n", .{ bytes_parsed_count, bytes_read_count });
 }
 
 //#endregion

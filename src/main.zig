@@ -1,5 +1,6 @@
 const std = @import("std");
 const Bitcoin = @import("bitcoin.zig");
+const Network = @import("network.zig");
 const GenericWriter = std.io.GenericWriter;
 const GenericReader = std.io.GenericReader;
 
@@ -12,7 +13,7 @@ pub fn main() !void {
     try stdout.print("\nYour address is {s}\n", .{address});
 
     while (true) {
-        try stdout.print("\n################################################\n\nHello dear hodler, tell me what can I do for you\n1. Show me what you got\n2. Sign a transaction\n3. Exit\n\n", .{});
+        try stdout.print("\n################################################\n\nHello dear hodler, tell me what can I do for you\n1. Show me what you got\n2. Sign a transaction\n3. Connect to another node\n4. Exit\n\n", .{});
 
         var buf: [9]u8 = undefined;
         const input = try stdin.readUntilDelimiter(&buf, '\n');
@@ -30,7 +31,14 @@ pub fn main() !void {
                 defer std.heap.page_allocator.free(bytes);
                 try stdout.print("\nTransaction:\n{}\n", .{std.fmt.fmtSliceHexLower(bytes)});
             },
-            '3' => break,
+            '3' => {
+                //const targetIpAddress = std.net.Address{ .in = .init([_]u8{74,220,255,190},8333) };//try promptIpAddress();
+                //const targetIpAddress = std.net.Address{ .in = .init([_]u8{58,96,123,120},8333) };//try promptIpAddress();
+                const targetIpAddress = try promptIpAddress();
+                const connection = try Network.Node.connect(targetIpAddress);
+                try stdout.print("\nConnection established successfully with \nIP: {any}\nUser Agent: {s}\n", .{ connection.peer_address, connection.user_agent });
+            },
+            '4' => break,
             else => {
                 try stdout.print("\ninvalid byte read: {x}\n", .{b});
             },
@@ -46,8 +54,8 @@ fn promptTransaction() !Bitcoin.Tx {
     var buf2: [256]u8 = undefined;
     const prev_txid_bytes = try promptBytesHex(&buf, "Previous TXID (32 bytes)");
     const prev_txid = try std.fmt.parseInt(u256, prev_txid_bytes[0..64], 16);
-    const prev_output_index = try promptInt(u32, "Previous output index");
-    const amount = try promptInt(u64, "Amount to send");
+    const prev_output_index = try promptInt(u32, "Previous output index", .{});
+    const amount = try promptInt(u64, "Amount to send", .{});
     const target_address = try promptString(&buf2, "Target address");
     return try Bitcoin.Tx.initP2PKH(testnet, prev_txid, prev_output_index, amount, target_address);
 }
@@ -83,16 +91,32 @@ fn promptString(buffer: []u8, msg: []const u8) ![]u8 {
     return answer;
 }
 
-fn promptInt(comptime T: type, msg: []const u8) !T {
+const PromptIntOpts = struct { default_value: ?comptime_int = null };
+fn promptInt(comptime T: type, msg: []const u8, opts: PromptIntOpts) !T {
     const stdout = std.io.getStdOut().writer();
     const stdin = std.io.getStdIn().reader();
-    try stdout.print("{s} [numeric]: ", .{msg});
+    if (opts.default_value) |default| {
+        try stdout.print("{s} [numeric, default={}]: ", .{msg, default});
+    } else {
+        try stdout.print("{s} [numeric]: ", .{msg});
+    }
     var buf: [256]u8 = undefined;
-    var answer = while (true) {
+    var answer: []u8 = while (true) {
         const input = try stdin.readUntilDelimiter(&buf, '\n');
-        if (input.len > 0 and input[0] != '\n' and input[0] != '\r')
+        if (input.len > 0 and input[0] != '\n' and input[0] != '\r') {
             break input;
+        } else if (opts.default_value != null) {
+            break &[0]u8{};
+        }
     };
+    if (answer.len == 0) return opts.default_value orelse unreachable;
     if (answer[answer.len - 1] == '\r') answer = answer[0 .. answer.len - 1];
     return try std.fmt.parseInt(T, answer[0..], 10);
+}
+
+fn promptIpAddress() !std.net.Address {
+    var buf: [256]u8 = undefined;
+    const ip = try promptString(&buf, "Enter the IPv4 or IPv6 [without port]");
+    const port = try promptInt(u16, "Enter the port", .{ .default_value = 8333 });
+    return try std.net.Address.resolveIp(ip, port);
 }

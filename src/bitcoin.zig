@@ -92,12 +92,12 @@ fn hash160(bytes: []const u8, out: []u8) void {
 }
 
 pub const Address = struct {
-    pub fn fromPrivkey(privkey: u256, testnet: bool, out: []u8) []u8 {
+    pub fn fromPrivkey(privkey: u256, testnet: bool, buf: []u8) []u8 {
         const pubkey = CryptLib.G.muli(privkey);
-        return fromPubkey(pubkey, testnet, out);
+        return fromPubkey(pubkey, testnet, buf);
     }
 
-    pub fn fromPubkey(pubkey: EllipticCurveLib.CurvePoint(u256), testnet: bool, out: []u8) []u8 {
+    pub fn fromPubkey(pubkey: EllipticCurveLib.CurvePoint(u256), testnet: bool, buf: []u8) []u8 {
         const hash160_data: [21]u8 = hash160_data: {
             var hash160_data: [21]u8 = undefined;
             var serializedPoint: [33]u8 = undefined;
@@ -120,12 +120,12 @@ pub const Address = struct {
         };
 
         const address = hash160_data ++ checksum;
-        const encoded = Base58.encode(&address, out[0..]);
+        const encoded = Base58.encode(&address, buf[0..]);
         if (testnet) {
             return encoded;
         } else {
-            out[out.len - encoded.len - 1] = '1';
-            return out[out.len - encoded.len - 1 ..];
+            buf[buf.len - encoded.len - 1] = '1';
+            return buf[buf.len - encoded.len - 1 ..];
         }
     }
 

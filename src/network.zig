@@ -1,3 +1,5 @@
+// @TODO make sure we can test with std.testing.allocator everywhere
+
 const std = @import("std");
 const net = std.net;
 const assert = std.debug.assert;
@@ -25,7 +27,7 @@ pub const Protocol = struct {
         ping: struct {
             nonce: u64,
 
-            pub fn serialize(self: @This(), writer: std.io.AnyWriter) !void {
+            pub fn serialize(self: @This(), writer: std.io.AnyWriter) anyerror!void {
                 // length
                 try expect(@sizeOf(@TypeOf(self)) == 8);
                 try writer.writeInt(u32, 8, .little);
@@ -42,7 +44,8 @@ pub const Protocol = struct {
                 try writer.writeInt(u64, self.nonce, .little);
             }
 
-            pub fn parse(data: []const u8) !ParseResult {
+            pub fn parse(data: []const u8, unused: std.mem.Allocator) anyerror!ParseResult {
+                _ = unused;
                 var reader = Cursor.init(data);
 
                 var res = ParseResult{
@@ -78,7 +81,7 @@ pub const Protocol = struct {
         pong: struct {
             nonce: u64,
 
-            pub fn serialize(self: @This(), writer: std.io.AnyWriter) !void {
+            pub fn serialize(self: @This(), writer: std.io.AnyWriter) anyerror!void {
                 // length
                 try expect(@sizeOf(@TypeOf(self)) == 8);
                 try writer.writeInt(u32, 8, .little);
@@ -95,7 +98,8 @@ pub const Protocol = struct {
                 try writer.writeInt(u64, self.nonce, .little);
             }
 
-            pub fn parse(data: []const u8) !ParseResult {
+            pub fn parse(data: []const u8, unused: std.mem.Allocator) anyerror!ParseResult {
+                _ = unused;
                 var reader = Cursor.init(data);
                 var res = ParseResult{
                     .value = Message{ .pong = .{ .nonce = undefined } },
@@ -139,11 +143,11 @@ pub const Protocol = struct {
             sender_ip: [16]u8 = ipv4_as_ipv6([4]u8{ 127, 0, 0, 1 }),
             sender_port: u16 = 8333,
             nonce: u64 = 0x1f297b45,
-            user_agent: []const u8 = "Zignode",
+            user_agent: []const u8,
             start_height: i32 = 0,
             relay: bool = false,
 
-            pub fn serialize(self: @This(), writer: std.io.AnyWriter) !void {
+            pub fn serialize(self: @This(), writer: std.io.AnyWriter) anyerror!void {
                 var payload_buffer: [256]u8 = undefined;
                 {
                     var bufstream = std.io.fixedBufferStream(&payload_buffer);
@@ -182,10 +186,10 @@ pub const Protocol = struct {
                 try writer.writeAll(payload_buffer[0..payload_size]);
             }
 
-            pub fn parse(data: []const u8) !ParseResult {
+            pub fn parse(data: []const u8, alloc: std.mem.Allocator) anyerror!ParseResult {
                 var reader = Cursor.init(data);
                 var res = ParseResult{
-                    .value = Message{ .version = .{ .timestamp = 0 } },
+                    .value = Message{ .version = .{ .timestamp = 0, .user_agent = undefined } },
                     .bytes_read_count = 0,
                 };
 
@@ -230,7 +234,7 @@ pub const Protocol = struct {
 
                 var buffer: [256]u8 = undefined;
                 reader.readBytes(buffer[0..user_agent_len]);
-                out.user_agent = try allocator.dupe(u8, buffer[0..user_agent_len]);
+                out.user_agent = try alloc.dupe(u8, buffer[0..user_agent_len]);
                 res.bytes_read_count += user_agent_len;
 
                 out.start_height = reader.readInt(i32, .little);
@@ -251,15 +255,20 @@ pub const Protocol = struct {
 
                 return res;
             }
+
+            pub fn deinit(self: @This(), alloc: std.mem.Allocator) void {
+                alloc.free(self.user_agent);
+            }
         },
         verack: struct {
-            pub fn serialize(self: @This(), writer: std.io.AnyWriter) !void {
+            pub fn serialize(self: @This(), writer: std.io.AnyWriter) anyerror!void {
                 _ = self;
                 const serialized = [_]u8{ 0xf9, 0xbe, 0xb4, 0xd9, 0x76, 0x65, 0x72, 0x61, 0x63, 0x6b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x5d, 0xf6, 0xe0, 0xe2 };
                 try writer.writeAll(&serialized);
             }
 
-            pub fn parse(data: []const u8) !ParseResult {
+            pub fn parse(data: []const u8, unused: std.mem.Allocator) anyerror!ParseResult {
+                _ = unused;
                 var reader = Cursor.init(data);
                 assert(reader.readInt(u32, .little) == 0);
                 assert(reader.readInt(u32, .big) == 0x5df6e0e2);
@@ -272,14 +281,15 @@ pub const Protocol = struct {
             hash_start_block: u256 = genesis_block_hash,
             hash_final_block: u256 = 0,
 
-            pub fn serialize(self: @This(), writer: std.io.AnyWriter) !void {
+            pub fn serialize(self: @This(), writer: std.io.AnyWriter) anyerror!void {
                 try writer.writeInt(i32, self.version, .little);
                 try Bitcoin.Aux.writeVarint(writer, self.hash_count);
                 try writer.writeInt(u256, self.hash_start_block, .little);
                 try writer.writeInt(u256, self.hash_final_block, .little);
             }
 
-            pub fn parse(data: []const u8) !ParseResult {
+            pub fn parse(data: []const u8, unused: std.mem.Allocator) anyerror!ParseResult {
+                _ = unused;
                 var cursor = Cursor.init(data);
                 var res = ParseResult { .value = .{ .getheaders = .{}}, .bytes_read_count = 0 };
 
@@ -303,14 +313,15 @@ pub const Protocol = struct {
             data: Bitcoin.Block,
             count: u32,
 
-            pub fn serialize(self: @This(), writer: std.io.AnyWriter) !void {
+            pub fn serialize(self: @This(), writer: std.io.AnyWriter) anyerror!void {
                 const serialization = try self.data.serialize(allocator);
                 defer allocator.free(serialization);
                 try writer.writeAll(serialization);
                 try Bitcoin.Aux.writeVarint(writer, self.count);
             }
 
-            pub fn parse(data: []const u8) !ParseResult {
+            pub fn parse(data: []const u8, unused: std.mem.Allocator) anyerror!ParseResult {
+                _ = unused;
                 const block_res = try Bitcoin.Block.parse(data);
                 assert(@sizeOf(Bitcoin.Block) == 80);
                 var cursor = Cursor.init(data[80..]);
@@ -323,6 +334,57 @@ pub const Protocol = struct {
                 };
             }
         },
+
+        // Enforce function signatures on each union tag (each protocol command)
+        comptime {
+            const T = Protocol.Message;
+
+            const Function = struct {
+                mandatory: bool,
+                name: []const u8,
+                return_type: type,
+                params: []const type,
+            };
+            const functions = .{
+                Function {
+                    .mandatory = true,
+                    .name = "serialize",
+                    .return_type = anyerror!void,
+                    .params = &[_]type{ void, std.io.AnyWriter }
+                },
+                Function {
+                    .mandatory = true,
+                    .name = "parse",
+                    .return_type = anyerror!Protocol.Message.ParseResult,
+                    .params = &[_]type{ []const u8, std.mem.Allocator}
+                },
+                Function {
+                    .mandatory = false,
+                    .name = "deinit",
+                    .return_type = void,
+                    .params = &[_]type{ std.mem.Allocator}
+                },
+            };
+
+            for (@typeInfo(T).@"union".fields) |field| {
+                for (functions) |function| {
+                    if (!@hasDecl(field.type, function.name)) {
+                        if (function.mandatory) {
+                            var buf: [200]u8 = undefined;
+                            @compileError(std.fmt.bufPrint(&buf, "A {} function is required for {}.{}", .{ function.name, @typeName(T), field.name }) catch "E879234");
+                        } else continue;
+                    }
+                    const pf = @field(field.type, function.name);
+                    const fn_info = @typeInfo(@TypeOf(pf)).@"fn";
+                    if (fn_info.return_type != function.return_type) {
+                        var buf: [200]u8 = undefined;
+                        @compileError(std.fmt.bufPrint( &buf, "The function {s}.{s}.{s} has the wrong signature. Should be: fn {s}({d}) {s}", .{ @typeName(T), field.name, function.name, function.name, function.params.len, @typeName(function.return_type) }) catch "E1293485");
+                    }
+
+                    // TODO check parameters and ignore when void
+                }
+            }
+        }
 
         /// Includes the protocol headers (https://en.bitcoin.it/wiki/Protocol_documentation#Message_structure)
         pub fn serialize(self: *const Message, buffer: []u8) ![]u8 {
@@ -342,16 +404,14 @@ pub const Protocol = struct {
 
             // payload length, checksum and contents
             switch (self.*) {
-                //.ping => |ping| try ping.serialize(writer.any()),
-                //.pong => |pong| try pong.serialize(writer.any()),
-                //.version => |version| try version.serialize(writer.any()),
                 inline else => |field| try field.serialize(writer.any()),
             }
             return buffer[0..writer.context.pos];
         }
 
         const ParseResult = struct { value: Message, bytes_read_count: u32 };
-        pub fn parse(bytes: []u8) !ParseResult {
+
+        pub fn parse(bytes: []u8, alloc: std.mem.Allocator) !ParseResult {
             var strm = std.io.fixedBufferStream(bytes);
             var reader = strm.reader();
             var res: ParseResult = .{
@@ -376,13 +436,26 @@ pub const Protocol = struct {
             const tagName = command[0..first_zero_index];
             inline for (@typeInfo(Message).@"union".fields) |field| {
                 if (std.mem.eql(u8, field.name, tagName)) {
-                    const version_res = try field.type.parse(bytes[res.bytes_read_count..]);
+                    const version_res = try field.type.parse(bytes[res.bytes_read_count..], alloc);
                     res.value = version_res.value;
                     res.bytes_read_count += version_res.bytes_read_count;
                 }
             }
 
             return res;
+        }
+
+        pub fn deinit(self: Message, alloc: std.mem.Allocator) void {
+            inline for (@typeInfo(Message).@"union".fields) |field| {
+                switch (self) {
+                    inline else => |field_instance| {
+                        if (@hasDecl(field.type, "deinit")) {
+                            if (@TypeOf(field_instance) == field.type)
+                                field_instance.deinit(alloc);
+                        }
+                    }
+                }
+            }
         }
     };
 
@@ -397,18 +470,20 @@ pub const Protocol = struct {
 pub const Node = struct {
     pub const Connection = struct {
         peer_address: net.Address,
+        peer_version: i32,
         stream: net.Stream,
         handshaked: bool,
         user_agent: [30]u8,
     };
 
-    pub fn connect(address: net.Address) !Connection {
+    pub fn connect(address: net.Address, alloc: std.mem.Allocator) !Connection {
         const stream = net.tcpConnectToAddress(address) catch |err| {
             std.debug.print("Failed to connect to {}: {s}\n", .{ address, @errorName(err) });
             return error.ConnectionError;
         };
         var connection = Connection {
             .peer_address = address,
+            .peer_version = 0,
             .stream = stream,
             .handshaked = false,
             .user_agent = undefined,
@@ -421,18 +496,22 @@ pub const Node = struct {
                 .timestamp = timestamp,
                 .nonce = @intCast(timestamp),
                 .start_height = 0,
+                .user_agent = try alloc.dupe(u8, "Zignode"),
             },
         });
 
         // Read answer
-        // @TODO leaking memory rn, deinit messages later
         var received: [2]Protocol.Message = undefined;
-        received[0] = try Node.readMessage(connection);
-        received[1] = try Node.readMessage(connection);
+
+        received[0] = try Node.readMessage(connection, alloc);
+        defer received[0].deinit(alloc);
+
+        received[1] = try Node.readMessage(connection, alloc);
+        defer received[1].deinit(alloc);
 
         // Information to obtain
         var verack_received: bool = false;
-        var version_received: bool = false;
+        var version_received: ?i32 = null;
         var user_agent_received: [30]u8 = [1]u8{'.'} ++ [1]u8{' '}**29;
         for (received) |msg| {
             switch (msg) {
@@ -443,14 +522,16 @@ pub const Node = struct {
                         if (i > user_agent_received.len) break;
                         user_agent_received[i] = ch;
                     }
-                    version_received = true;
+                    version_received = v_msg.version;
                 },
                 Protocol.Message.verack => verack_received = true,
                 else => return error.UnexpectedMessageOnHandshake,
             }
         }
 
-        if (version_received and verack_received) {
+        if (version_received != null and verack_received) {
+            try Node.sendMessage(connection, Protocol.Message { .verack = .{} });
+            connection.peer_version = version_received.?;
             connection.handshaked = true;
             connection.user_agent = user_agent_received;
             return connection;
@@ -468,8 +549,8 @@ pub const Node = struct {
         };
     }
 
-    /// Synchronously waits to receive bytes
-    pub fn readMessage(connection: Connection) !Protocol.Message {
+    /// Synchronously waits to receive bytes. Caller should call .deinit() returned value
+    pub fn readMessage(connection: Connection, alloc: std.mem.Allocator) !Protocol.Message {
         const header_len = 24;
         var buffer = ([1]u8{0} ** header_len) ++ ([1]u8{0} ** (1024*256));
         var header_slice = buffer[0..header_len];
@@ -487,7 +568,7 @@ pub const Node = struct {
         };
         if (read_count2 < payload_length) return error.ReceiveError;
 
-        const result = Protocol.Message.parse(buffer[0..]) catch return error.PayloadParseError;
+        const result = Protocol.Message.parse(buffer[0..], alloc) catch return error.PayloadParseError;
         return result.value;
     }
 };

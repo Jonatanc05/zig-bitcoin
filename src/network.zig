@@ -1,9 +1,6 @@
-// @TODO make sure we can test with std.testing.allocator everywhere
-
 const std = @import("std");
 const net = std.net;
 const assert = std.debug.assert;
-var allocator = std.heap.page_allocator;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
 // managed dependencies
@@ -314,8 +311,8 @@ pub const Protocol = struct {
             count: u32,
 
             pub fn serialize(self: @This(), writer: std.io.AnyWriter) anyerror!void {
-                const serialization = try self.data.serialize(allocator);
-                defer allocator.free(serialization);
+                var buffer: [80]u8 = undefined;
+                const serialization = try self.data.serialize(&buffer);
                 try writer.writeAll(serialization);
                 try Bitcoin.Aux.writeVarint(writer, self.count);
             }
@@ -496,7 +493,7 @@ pub const Node = struct {
                 .timestamp = timestamp,
                 .nonce = @intCast(timestamp),
                 .start_height = 0,
-                .user_agent = try alloc.dupe(u8, "Zignode"),
+                .user_agent = "Zignode",
             },
         });
 
@@ -576,6 +573,7 @@ pub const Node = struct {
 //#region TESTS #########################################################################
 
 const expect = std.testing.expect;
+const t_alloc = std.testing.allocator;
 
 test "protocol: message serialization" {
     const message = Protocol.Message{ .ping = .{ .nonce = 0x127f } };
@@ -588,7 +586,7 @@ test "protocol: message serialization" {
         res,
     );
 
-    const parsed_res = (try Protocol.Message.parse(res)).value;
+    const parsed_res = (try Protocol.Message.parse(res, t_alloc)).value;
     var buffer2 = [_]u8{0} ** 32;
     const serialized_parsed_res = try parsed_res.serialize(&buffer2);
 
@@ -605,15 +603,9 @@ test "protocol: handshake and version" {
     //const host = "77.173.132.140"; // from bitcoin core's nodes_main.txt
     const port = 8333;
     const address = try net.Address.resolveIp(host, port);
-    _ = Node.connect(address) catch |err| switch (err) {
-        error.ConnectionError,
-        error.SendError,
-        error.ReceiveError,
-        error.HandshakeFailed,
-        error.UnexpectedMessageOnHandshake,
-        error.VersionMismatch => return std.debug.print("failed to connect: {s}\n", .{ @errorName(err) }),
-        else => return err,
-    };
+    const connection = try Node.connect(address, t_alloc);
+    try expect(connection.handshaked);
+    try expect(connection.peer_version > 0);
 }
 
 //#endregion

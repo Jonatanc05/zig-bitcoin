@@ -6,6 +6,7 @@ const EllipticCurveLib = @import("elliptic-curve.zig");
 const fe = EllipticCurveLib.FieldElement(u256).fieldElementShortcut;
 const CurvePoint = EllipticCurveLib.CurvePoint(u256);
 const Bitcoin = @import("bitcoin.zig");
+const allocator = std.heap.page_allocator;
 
 const CryptLib = @import("cryptography.zig");
 
@@ -141,8 +142,8 @@ pub fn print(privkey: u256) !void {
                 0x00, 0x00, 0x00, 0x00 // locktime
             };
             // zig fmt: on
-            const transaction = try Bitcoin.Tx.parse(transaction_bytes[0..transaction_bytes.len]);
-            defer transaction.deinit();
+            const transaction = try Bitcoin.Tx.parse(transaction_bytes[0..transaction_bytes.len], allocator);
+            defer transaction.deinit(allocator);
             stdprint("{any}\n", .{transaction});
         }
 
@@ -168,8 +169,8 @@ pub fn print(privkey: u256) !void {
                 0x00, 0x00, 0x00, 0x00 // locktime
             };
             // zig fmt: on
-            const transaction = try Bitcoin.Tx.parse(transaction_bytes[0..transaction_bytes.len]);
-            defer transaction.deinit();
+            const transaction = try Bitcoin.Tx.parse(transaction_bytes[0..transaction_bytes.len], allocator);
+            defer transaction.deinit(allocator);
             stdprint("{any}\n", .{transaction});
         }
 
@@ -193,7 +194,7 @@ pub fn print(privkey: u256) !void {
             stdprint("script_sig in hex: ", .{});
             for (script_sig) |b| stdprint("{x:0>2}", .{b});
             stdprint("\n", .{});
-            const valid = Bitcoin.Script.validate(&script_sig, &script_pub_key, null, null);
+            const valid = Bitcoin.Script.validate(&script_sig, &script_pub_key, null, null, allocator);
             stdprint("valid: {any}\n", .{valid});
         }
 
@@ -206,10 +207,17 @@ pub fn print(privkey: u256) !void {
             const prev_script_pubkey = [_]u8{ 0x76, 0xa9, 0x14, 0xaf, 0x72, 0x4f, 0xc6, 0x1f, 0x4d, 0x5c, 0x4d, 0xb0, 0x6b, 0x33, 0x95, 0xc9, 0xb4, 0x50, 0xa8, 0x0d, 0x25, 0xb6, 0x73, 0x88, 0xac };
             const target_address = "mnvfTUzPbeWBxwxinm37C1bsQ5ckZuN9E7";
 
-            var transaction = try Bitcoin.Tx.initP2PKH(true, prev_txid, 1, 5000, target_address);
-            defer transaction.deinit();
+            var transaction = try Bitcoin.Tx.initP2PKH(.{
+                .testnet = true,
+                .prev_txid = prev_txid,
+                .prev_output_index = 1,
+                .amount = 5000,
+                .target_address = target_address,
+                .alloc = allocator,
+            });
+            defer transaction.deinit(allocator);
 
-            try transaction.sign(privkey, 0, &prev_script_pubkey);
+            try transaction.sign(privkey, 0, &prev_script_pubkey, allocator);
 
             const serialized = try transaction.serialize(std.heap.page_allocator);
             defer std.heap.page_allocator.free(serialized);
@@ -227,6 +235,7 @@ pub fn print(privkey: u256) !void {
                 transaction.inputs[0].script_sig[1..][0..(transaction.inputs[0].script_sig[0])],
                 //transaction.witness.?[0], // or above
                 &prev_script_pubkey,
+                allocator,
             );
             stdprint("OP_CHECKSIG result: {s}\n", .{if (checksig) "valid" else "invalid"});
         }

@@ -162,7 +162,8 @@ pub const Protocol = struct {
                     try bufwriter.writeInt(u16, self.sender_port, .big);
 
                     try bufwriter.writeInt(u64, self.nonce, .little);
-                    try bufwriter.writeInt(u8, @intCast(self.user_agent.len), .little); // TODO check size bc this is supposed to be a varint
+                    std.debug.assert(self.user_agent.len < 0xfd); // It's supposed to be read as varint
+                    try bufwriter.writeInt(u8, @intCast(self.user_agent.len), .little);
                     try bufwriter.writeAll(self.user_agent);
                     try bufwriter.writeInt(i32, self.start_height, .little);
 
@@ -288,7 +289,10 @@ pub const Protocol = struct {
             pub fn parse(data: []const u8, unused: std.mem.Allocator) anyerror!ParseResult {
                 _ = unused;
                 var cursor = Cursor.init(data);
-                var res = ParseResult { .value = .{ .getheaders = .{}}, .bytes_read_count = 0 };
+                var res = ParseResult{
+                    .value = .{ .getheaders = .{} },
+                    .bytes_read_count = 0,
+                };
 
                 res.value.getheaders.version = cursor.readInt(i32, .little);
                 res.bytes_read_count += 4;
@@ -326,7 +330,7 @@ pub const Protocol = struct {
                 const count = cursor.readVarint();
                 const total_read: u32 = 80 + @as(u32, @intCast(cursor.index - starting_index));
                 return .{
-                    .value = .{ .headers = .{ .data = block_res, .count = count }},
+                    .value = .{ .headers = .{ .data = block_res, .count = count } },
                     .bytes_read_count = total_read,
                 };
             }
@@ -343,24 +347,9 @@ pub const Protocol = struct {
                 params: []const type,
             };
             const functions = .{
-                Function {
-                    .mandatory = true,
-                    .name = "serialize",
-                    .return_type = anyerror!void,
-                    .params = &[_]type{ void, std.io.AnyWriter }
-                },
-                Function {
-                    .mandatory = true,
-                    .name = "parse",
-                    .return_type = anyerror!Protocol.Message.ParseResult,
-                    .params = &[_]type{ []const u8, std.mem.Allocator}
-                },
-                Function {
-                    .mandatory = false,
-                    .name = "deinit",
-                    .return_type = void,
-                    .params = &[_]type{ std.mem.Allocator}
-                },
+                Function{ .mandatory = true, .name = "serialize", .return_type = anyerror!void, .params = &[_]type{ void, std.io.AnyWriter } },
+                Function{ .mandatory = true, .name = "parse", .return_type = anyerror!Protocol.Message.ParseResult, .params = &[_]type{ []const u8, std.mem.Allocator } },
+                Function{ .mandatory = false, .name = "deinit", .return_type = void, .params = &[_]type{std.mem.Allocator} },
             };
 
             for (@typeInfo(T).@"union".fields) |field| {
@@ -375,7 +364,7 @@ pub const Protocol = struct {
                     const fn_info = @typeInfo(@TypeOf(pf)).@"fn";
                     if (fn_info.return_type != function.return_type) {
                         var buf: [200]u8 = undefined;
-                        @compileError(std.fmt.bufPrint( &buf, "The function {s}.{s}.{s} has the wrong signature. Should be: fn {s}({d}) {s}", .{ @typeName(T), field.name, function.name, function.name, function.params.len, @typeName(function.return_type) }) catch "E1293485");
+                        @compileError(std.fmt.bufPrint(&buf, "The function {s}.{s}.{s} has the wrong signature. Should be: fn {s}({d}) {s}", .{ @typeName(T), field.name, function.name, function.name, function.params.len, @typeName(function.return_type) }) catch "E1293485");
                     }
 
                     // TODO check parameters and ignore when void
@@ -450,7 +439,7 @@ pub const Protocol = struct {
                             if (@TypeOf(field_instance) == field.type)
                                 field_instance.deinit(alloc);
                         }
-                    }
+                    },
                 }
             }
         }
@@ -478,7 +467,7 @@ pub const Node = struct {
             std.debug.print("Failed to connect to {}: {s}\n", .{ address, @errorName(err) });
             return error.ConnectionError;
         };
-        var connection = Connection {
+        var connection = Connection{
             .peer_address = address,
             .peer_version = 0,
             .stream = stream,
@@ -509,7 +498,7 @@ pub const Node = struct {
         // Information to obtain
         var verack_received: bool = false;
         var version_received: ?i32 = null;
-        var user_agent_received: [30]u8 = [1]u8{'.'} ++ [1]u8{' '}**29;
+        var user_agent_received: [30]u8 = [1]u8{'.'} ++ [1]u8{' '} ** 29;
         for (received) |msg| {
             switch (msg) {
                 Protocol.Message.version => |v_msg| {
@@ -527,7 +516,7 @@ pub const Node = struct {
         }
 
         if (version_received != null and verack_received) {
-            try Node.sendMessage(connection, Protocol.Message { .verack = .{} });
+            try Node.sendMessage(connection, Protocol.Message{ .verack = .{} });
             connection.peer_version = version_received.?;
             connection.handshaked = true;
             connection.user_agent = user_agent_received;
@@ -549,7 +538,7 @@ pub const Node = struct {
     /// Synchronously waits to receive bytes. Caller should call .deinit() returned value
     pub fn readMessage(connection: Connection, alloc: std.mem.Allocator) !Protocol.Message {
         const header_len = 24;
-        var buffer = ([1]u8{0} ** header_len) ++ ([1]u8{0} ** (1024*256));
+        var buffer = ([1]u8{0} ** header_len) ++ ([1]u8{0} ** (1024 * 256));
         var header_slice = buffer[0..header_len];
 
         const read_count1 = connection.stream.readAtLeast(header_slice, header_len) catch |err| {

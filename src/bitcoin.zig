@@ -1,8 +1,7 @@
 // std
 const std = @import("std");
+const mem = std.mem;
 const assert = std.debug.assert;
-// @TODO make sure we don't use this guy anymore. Make every allocation with alloc parameter so we can test with std.testing.allocator
-var allocator = std.heap.page_allocator;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
 // not managed dependencies
@@ -41,9 +40,9 @@ pub const Base58 = struct {
         var bytes_extended: [128]u8 = undefined;
         if (bytes.len != 128)
             bytes_extended = [_]u8{0} ** 128;
-        std.mem.copyForwards(u8, bytes_extended[(128 - bytes.len)..128], bytes);
+        mem.copyForwards(u8, bytes_extended[(128 - bytes.len)..128], bytes);
 
-        const bytes_as_u1024: u1024 = std.mem.readInt(u1024, &bytes_extended, .big);
+        const bytes_as_u1024: u1024 = mem.readInt(u1024, &bytes_extended, .big);
         var remaining = bytes_as_u1024;
         var i = out.len;
         while (remaining > 0) {
@@ -116,7 +115,7 @@ pub const Address = struct {
             Sha256.hash(&sha256_1, &sha256_2, .{});
 
             var checksum: [4]u8 = undefined;
-            std.mem.copyForwards(u8, &checksum, sha256_2[0..4]);
+            mem.copyForwards(u8, &checksum, sha256_2[0..4]);
             break :checksum checksum;
         };
 
@@ -142,7 +141,7 @@ pub const Address = struct {
                 std.debug.assert(decoded[0] == 0x00);
             }
         }
-        std.debug.assert(std.mem.eql(
+        std.debug.assert(mem.eql(
             u8,
             decoded[decoded.len - 4 ..][0..4],
             checksum: {
@@ -175,23 +174,31 @@ pub const Tx = struct {
         script_pubkey: []const u8,
     };
 
-    pub fn initP2PKH(testnet: bool, prev_txid: u256, prev_output_index: u32, amount: u64, target_address: []const u8) !Tx {
+    const InitP2PKHOpt = struct {
+        testnet: bool,
+        prev_txid: u256,
+        prev_output_index: u32,
+        amount: u64,
+        target_address: []const u8,
+        alloc: mem.Allocator,
+    };
+    pub fn initP2PKH(opt: InitP2PKHOpt) !Tx {
         return .{
             .version = 1,
-            .inputs = try allocator.dupe(TxInput, &.{
-                .{ .txid = prev_txid, .index = prev_output_index, .script_sig = &[_]u8{}, .sequence = 0xfffffffd },
+            .inputs = try opt.alloc.dupe(TxInput, &.{
+                .{ .txid = opt.prev_txid, .index = opt.prev_output_index, .script_sig = &[_]u8{}, .sequence = 0xfffffffd },
             }),
-            .outputs = try allocator.dupe(TxOutput, &outputs: {
+            .outputs = try opt.alloc.dupe(TxOutput, &outputs: {
                 var outputs: [1]TxOutput = .{
                     .{
-                        .amount = amount,
+                        .amount = opt.amount,
                         .script_pubkey = script_pubkey: {
-                            var script_pubkey: []u8 = try allocator.alloc(u8, 25);
+                            var script_pubkey: []u8 = try opt.alloc.alloc(u8, 25);
                             const Op = Script.Opcode;
                             script_pubkey[0] = Op.OP_DUP;
                             script_pubkey[1] = Op.OP_HASH160;
                             script_pubkey[2] = 0x14; // P2PKH address is 20 bytes
-                            std.mem.copyForwards(u8, script_pubkey[3..23], Address.toPubkey(target_address, testnet));
+                            mem.copyForwards(u8, script_pubkey[3..23], Address.toPubkey(opt.target_address, opt.testnet));
                             script_pubkey[23] = Op.OP_EQUALVERIFY;
                             script_pubkey[24] = Op.OP_CHECKSIG;
                             break :script_pubkey script_pubkey;
@@ -204,62 +211,63 @@ pub const Tx = struct {
         };
     }
 
-    pub fn deinit(self: *const Tx) void {
+    pub fn deinit(self: *const Tx, alloc: mem.Allocator) void {
         for (self.inputs) |input| {
-            allocator.free(input.script_sig);
+            alloc.free(input.script_sig);
         }
-        allocator.free(self.inputs);
+        alloc.free(self.inputs);
 
         for (self.outputs) |output| {
-            allocator.free(output.script_pubkey);
+            alloc.free(output.script_pubkey);
         }
-        allocator.free(self.outputs);
+        alloc.free(self.outputs);
 
         if (self.witness) |witness| {
             for (witness) |w| {
-                allocator.free(w);
+                alloc.free(w);
             }
-            allocator.free(witness);
+            alloc.free(witness);
         }
     }
 
-    fn hashForSigning(self: *Tx, input_index: usize, hashtype: u8, prev_script_pubkey: []const u8) !u256 {
+    fn hashForSigning(self: *const Tx, input_index: usize, hashtype: u8, prev_script_pubkey: []const u8, alloc: mem.Allocator) !u256 {
         var empty_script = [1]u8{0};
         const tx_copy = tx_copy: {
-            var temp: *Tx = try allocator.create(Tx);
+            var temp: *Tx = try alloc.create(Tx);
             temp.* = self.*;
-            temp.outputs = try allocator.dupe(Tx.TxOutput, self.outputs);
-            temp.inputs = try allocator.dupe(Tx.TxInput, self.inputs);
+            temp.outputs = try alloc.dupe(Tx.TxOutput, self.outputs);
+            temp.inputs = try alloc.dupe(Tx.TxInput, self.inputs);
             for (0..self.inputs.len) |i| {
                 if (i == input_index) {
-                    temp.inputs[i].script_sig = try allocator.dupe(u8, prev_script_pubkey);
+                    temp.inputs[i].script_sig = try alloc.dupe(u8, prev_script_pubkey);
                 } else {
-                    temp.inputs[i].script_sig = try allocator.dupe(u8, &empty_script);
+                    temp.inputs[i].script_sig = try alloc.dupe(u8, &empty_script);
                 }
             }
             break :tx_copy temp;
         };
         defer {
-            for (tx_copy.inputs) |input| allocator.free(input.script_sig);
-            allocator.free(tx_copy.outputs);
-            allocator.free(tx_copy.inputs);
-            allocator.destroy(tx_copy);
+            for (tx_copy.inputs) |input| alloc.free(input.script_sig);
+            alloc.free(tx_copy.outputs);
+            alloc.free(tx_copy.inputs);
+            alloc.destroy(tx_copy);
         }
 
-        const tx_copy_bytes = try tx_copy.serialize(allocator);
-        defer allocator.free(tx_copy_bytes);
-        const tx_copy_with_hashtype = try std.mem.concat(allocator, u8, &[_][]const u8{ tx_copy_bytes, &[4]u8{ hashtype, 0, 0, 0 } });
+        const tx_copy_bytes = try tx_copy.serialize(alloc);
+        defer alloc.free(tx_copy_bytes);
+        const tx_copy_with_hashtype = try mem.concat(alloc, u8, &[_][]const u8{ tx_copy_bytes, &[4]u8{ hashtype, 0, 0, 0 } });
+        defer alloc.free(tx_copy_with_hashtype);
         return double_hash: {
             const hash1 = CryptLib.hashAsU256(tx_copy_with_hashtype);
             var hash1_bytes: [32]u8 = undefined;
-            std.mem.writeInt(u256, &hash1_bytes, hash1, std.builtin.Endian.big);
+            mem.writeInt(u256, &hash1_bytes, hash1, std.builtin.Endian.big);
             break :double_hash CryptLib.hashAsU256(&hash1_bytes);
         };
     }
 
-    pub fn sign(self: *Tx, privkey: u256, input_index: usize, prev_script_pubkey: []const u8) !void {
+    pub fn sign(self: *Tx, privkey: u256, input_index: usize, prev_script_pubkey: []const u8, alloc: mem.Allocator) !void {
         const hashtype = 0x01;
-        const z = try self.hashForSigning(input_index, hashtype, prev_script_pubkey);
+        const z = try self.hashForSigning(input_index, hashtype, prev_script_pubkey, alloc);
 
         // @TODO does not satisfy full BIP141 specification
         const is_witness = for (self.outputs) |o| {
@@ -268,24 +276,24 @@ pub const Tx = struct {
             }
         } else false;
         if (is_witness) {
-            self.witness = try allocator.alloc([]u8, 2);
+            self.witness = try alloc.alloc([]u8, 2);
             self.witness.?[0] = witness_signature: {
                 var buffer: [72]u8 = undefined;
                 const signature = CryptLib.sign(z, privkey).serialize(&buffer);
-                const witness_signature = try allocator.alloc(u8, signature.len + 1);
+                const witness_signature = try alloc.alloc(u8, signature.len + 1);
                 for (0..signature.len) |i| witness_signature[i] = signature[i];
                 witness_signature[72] = hashtype;
                 break :witness_signature witness_signature;
             };
-            self.witness.?[1] = try allocator.alloc(u8, 33);
+            self.witness.?[1] = try alloc.alloc(u8, 33);
             CryptLib.G.muli(privkey).serialize(true, self.witness.?[1][0..33]);
         } else {
-            allocator.free(self.inputs[input_index].script_sig);
+            alloc.free(self.inputs[input_index].script_sig);
             self.inputs[input_index].script_sig = resulting_script_sig: {
                 var buffer: [72]u8 = undefined;
                 const sig = CryptLib.sign(z, privkey).serialize(&buffer);
                 const resulting_script_sig_len = 1 + sig.len + 1 + 1 + 33; // <sig.len> <sig> <hashtype> <pubkey_len=33> <pubkey>
-                var resulting_script_sig = try allocator.alloc(u8, resulting_script_sig_len);
+                var resulting_script_sig = try alloc.alloc(u8, resulting_script_sig_len);
 
                 // signature
                 resulting_script_sig[0] = @intCast(sig.len + 1);
@@ -309,17 +317,17 @@ pub const Tx = struct {
         return transaction.checksig(input_index, pubkey, signature, script);
     }
 
-    pub fn checksig(transaction: *Tx, input_index: usize, pubkey: []const u8, signature: []const u8, script: []const u8) !bool {
+    pub fn checksig(transaction: *const Tx, input_index: usize, pubkey: []const u8, signature: []const u8, script: []const u8, alloc: mem.Allocator) !bool {
         const hashtype = signature[signature.len - 1];
         const sig = signature[0 .. signature.len - 1];
 
-        const z = try transaction.hashForSigning(input_index, hashtype, script);
+        const z = try transaction.hashForSigning(input_index, hashtype, script, alloc);
         const pubkey_parsed = EllipticCurveLib.CurvePoint(u256).parse(pubkey, CryptLib.secp256k1_p, CryptLib.G.a, CryptLib.G.b);
         return CryptLib.verify(z, pubkey_parsed, CryptLib.Signature.parse(sig));
     }
 
     /// Returns a slice owned by the caller
-    pub fn serialize(self: *const Tx, alloc: std.mem.Allocator) ![]u8 {
+    pub fn serialize(self: *const Tx, alloc: mem.Allocator) ![]u8 {
         var bytes = try std.ArrayList(u8).initCapacity(alloc, 100);
         defer bytes.deinit();
 
@@ -363,7 +371,7 @@ pub const Tx = struct {
         return bytes.toOwnedSlice();
     }
 
-    pub fn parse(data: []const u8) !Tx {
+    pub fn parse(data: []const u8, alloc: mem.Allocator) !Tx {
         var cursor = Cursor.init(data);
         var tx: Tx = undefined;
         var is_witness = false;
@@ -377,12 +385,12 @@ pub const Tx = struct {
                 assert(cursor.readInt(u8, .little) == 1); // witness flag
                 n_inputs = cursor.readVarint();
             }
-            const inputs = try allocator.alloc(TxInput, n_inputs);
+            const inputs = try alloc.alloc(TxInput, n_inputs);
             for (inputs) |*input| {
                 input.txid = cursor.readInt(u256, .little);
                 input.index = cursor.readInt(u32, .little);
                 input.script_sig = script_sig: {
-                    const script_sig = try allocator.alloc(u8, cursor.readVarint());
+                    const script_sig = try alloc.alloc(u8, cursor.readVarint());
                     cursor.readBytes(script_sig);
                     break :script_sig script_sig;
                 };
@@ -393,11 +401,11 @@ pub const Tx = struct {
 
         tx.outputs = outputs: {
             const n_outputs = cursor.readVarint();
-            const outputs = try allocator.alloc(TxOutput, n_outputs);
+            const outputs = try alloc.alloc(TxOutput, n_outputs);
             for (outputs) |*output| {
                 output.amount = cursor.readInt(u64, .little);
                 output.script_pubkey = script_pubkey: {
-                    const script_pubkey = try allocator.alloc(u8, cursor.readVarint());
+                    const script_pubkey = try alloc.alloc(u8, cursor.readVarint());
                     cursor.readBytes(script_pubkey);
                     break :script_pubkey script_pubkey;
                 };
@@ -409,9 +417,9 @@ pub const Tx = struct {
             if (!is_witness) break :witness null;
 
             const n_items = cursor.readVarint();
-            const temp_witness = try allocator.alloc([]u8, n_items);
+            const temp_witness = try alloc.alloc([]u8, n_items);
             for (0..n_items) |i| {
-                temp_witness[i] = try allocator.alloc(u8, cursor.readVarint());
+                temp_witness[i] = try alloc.alloc(u8, cursor.readVarint());
                 cursor.readBytes(temp_witness[i]);
             }
             break :witness temp_witness;
@@ -428,10 +436,10 @@ pub const Tx = struct {
             self.inputs[0].index == 0xffffffff;
     }
 
-    pub fn coinbaseBlockHeight(self: *const Tx) !u32 {
+    pub fn coinbaseBlockHeight(self: *const Tx, alloc: mem.Allocator) !u32 {
         if (!isCoinbase(self)) return error.NotACoinbaseTransaction;
-        const script = try Script.parse(self.inputs[0].script_sig);
-        defer script.deinit();
+        const script = try Script.parse(self.inputs[0].script_sig, alloc);
+        defer script.deinit(alloc);
         std.debug.assert(script.instructions[0] == .data);
         return script.instructions[0].data[0];
     }
@@ -445,8 +453,8 @@ pub const Script = struct {
         data: []u8,
     };
 
-    pub fn parse(bytes: []const u8) !Script {
-        var instructions = std.ArrayList(Instruction).init(allocator);
+    pub fn parse(bytes: []const u8, alloc: mem.Allocator) !Script {
+        var instructions = std.ArrayList(Instruction).init(alloc);
         defer instructions.deinit();
 
         var cursor = Cursor.init(bytes);
@@ -455,7 +463,7 @@ pub const Script = struct {
             switch (opcode) {
                 0x01...0x4b => { // Data
                     try instructions.append(.{
-                        .data = try allocator.dupe(u8, bytes[cursor.index..][0..opcode]),
+                        .data = try alloc.dupe(u8, bytes[cursor.index..][0..opcode]),
                     });
                     cursor.index += @intCast(opcode);
                 },
@@ -471,14 +479,14 @@ pub const Script = struct {
         };
     }
 
-    pub fn deinit(self: Script) void {
+    pub fn deinit(self: Script, alloc: mem.Allocator) void {
         for (self.instructions) |inst| {
             switch (inst) {
-                .data => |d| allocator.free(d),
+                .data => |d| alloc.free(d),
                 .opcode => {},
             }
         }
-        allocator.free(self.instructions);
+        alloc.free(self.instructions);
     }
 
     const Stack = struct {
@@ -500,16 +508,16 @@ pub const Script = struct {
 
         const Self = @This();
 
-        fn init(size: usize) !Self {
-            return .{ .data = try allocator.alloc(u8, size) };
+        fn init(size: usize, alloc: mem.Allocator) !Self {
+            return .{ .data = try alloc.alloc(u8, size) };
         }
 
-        fn deinit(self: *Self) void {
-            allocator.free(self.data);
+        fn deinit(self: *Self, alloc: mem.Allocator) void {
+            alloc.free(self.data);
         }
 
         fn push(self: *Self, value: []const u8) void {
-            std.mem.copyForwards(u8, self.data[self.top..][0..value.len], value);
+            mem.copyForwards(u8, self.data[self.top..][0..value.len], value);
             self.top += value.len;
             if (value.len > std.math.maxInt(u8))
                 @panic("Not handling this case yet: pushing more than 255 bytes");
@@ -518,7 +526,7 @@ pub const Script = struct {
         }
 
         fn pushInt(self: *Self, value: Self.Int) void {
-            self.push(std.mem.asBytes(&value));
+            self.push(mem.asBytes(&value));
         }
 
         fn pop(self: *Self, buffer: []u8) PopError![]u8 {
@@ -533,7 +541,7 @@ pub const Script = struct {
             if (next_byte > buffer.len)
                 return PopError.OutBufferTooSmall;
             const ret = self.data[self.top - next_byte .. self.top];
-            std.mem.copyForwards(u8, buffer[0..next_byte], ret);
+            mem.copyForwards(u8, buffer[0..next_byte], ret);
             self.top -= next_byte;
             return buffer[0..next_byte];
         }
@@ -545,7 +553,7 @@ pub const Script = struct {
             if (data.len > 4) {
                 return PopIntError.NotAnOperableInteger;
             } else if (data.len == 4) {
-                const data_as_unsigned = std.mem.readInt(u32, data[0..4], .big);
+                const data_as_unsigned = mem.readInt(u32, data[0..4], .big);
                 const sign_as_int: Self.Int = if (data_as_unsigned & 0x80000000 != 0) -1 else 1;
                 const value: Self.Int = (data_as_unsigned & 0x7FFFFFFF);
 
@@ -631,7 +639,7 @@ pub const Script = struct {
         }
     };
 
-    pub fn run(script: []const u8, stack: *Stack, transaction: ?*Tx, input_index: ?usize) !void {
+    pub fn run(script: []const u8, stack: *Stack, transaction: ?*Tx, input_index: ?usize, alloc: mem.Allocator) !void {
         const Op = Opcode;
         var scriptReader = Cursor.init(script);
         while (!scriptReader.ended()) {
@@ -677,7 +685,7 @@ pub const Script = struct {
                     var buffer_b: [Stack.MAX_STACK_ELEMENT_SIZE]u8 = undefined;
                     const a = try stack.pop(&buffer_a);
                     const b = try stack.pop(&buffer_b);
-                    const eq: u8 = if (std.mem.eql(u8, a, b)) 1 else 0;
+                    const eq: u8 = if (mem.eql(u8, a, b)) 1 else 0;
                     stack.push(&[1]u8{eq});
                 },
                 Op.OP_EQUALVERIFY => {
@@ -685,7 +693,7 @@ pub const Script = struct {
                     var buffer_b: [Stack.MAX_STACK_ELEMENT_SIZE]u8 = undefined;
                     const a = try stack.pop(&buffer_a);
                     const b = try stack.pop(&buffer_b);
-                    if (!std.mem.eql(u8, a, b)) {
+                    if (!mem.eql(u8, a, b)) {
                         return error.VerifyFailed;
                     }
                 },
@@ -733,26 +741,28 @@ pub const Script = struct {
                     var buffer_signature: [Stack.MAX_STACK_ELEMENT_SIZE]u8 = undefined;
                     const pubkey = try stack.pop(&buffer_pubkey);
                     const signature = try stack.pop(&buffer_signature);
-                    if (try Tx.checksig(transaction.?, input_index.?, pubkey, signature, script)) {
+                    if (try Tx.checksig(transaction.?, input_index.?, pubkey, signature, script, alloc)) {
                         stack.push(&[1]u8{1});
                     } else {
                         stack.push(&[1]u8{0});
                     }
                 },
                 else => {
-                    const msg = std.fmt.allocPrint(allocator, "Opcode {} not implemented\n", .{opcode}) catch @panic("While running a Script, a not implemented Opcode was found");
+                    var buffer: [100]u8 = undefined;
+                    const msg = std.fmt.bufPrint(&buffer, "Opcode {} not implemented\n", .{opcode})
+                        catch @panic("While running a Script, a not implemented Opcode was found");
                     @panic(msg);
                 },
             }
         }
     }
 
-    pub fn validate(scriptSig: []const u8, scriptPubKey: []const u8, transaction: ?*Tx, input_index: ?usize) !bool {
-        var stack = try Stack.init(scriptSig.len + scriptPubKey.len); // @TODO is this reasonable?
-        defer stack.deinit();
+    pub fn validate(scriptSig: []const u8, scriptPubKey: []const u8, transaction: ?*Tx, input_index: ?usize, alloc: mem.Allocator) !bool {
+        var stack = try Stack.init(scriptSig.len + scriptPubKey.len, alloc); // @TODO is this reasonable?
+        defer stack.deinit(alloc);
 
-        Script.run(scriptSig, &stack, transaction, input_index) catch return false;
-        Script.run(scriptPubKey, &stack, transaction, input_index) catch return false;
+        Script.run(scriptSig, &stack, transaction, input_index, alloc) catch return false;
+        Script.run(scriptPubKey, &stack, transaction, input_index, alloc) catch return false;
 
         return stack.verify();
     }
@@ -802,33 +812,33 @@ pub const Block = struct {
         var intermediate_buffer1: [32]u8 = undefined;
         Sha256.hash(serialized, intermediate_buffer1[0..32], .{});
         Sha256.hash(intermediate_buffer1[0..32], buffer[0..32], .{});
-        std.mem.reverse(u8, buffer[0..32]);
+        mem.reverse(u8, buffer[0..32]);
     }
 
     pub fn bitsToTarget(bits: u32) u256 {
         var as_bytes: [4]u8 = undefined;
-        std.mem.writeInt(u32, &as_bytes, bits, .big);
-        const coefficient = std.mem.readInt(u24, as_bytes[0..3], .little);
+        mem.writeInt(u32, &as_bytes, bits, .big);
+        const coefficient = mem.readInt(u24, as_bytes[0..3], .little);
         const exponent = as_bytes[3];
         return @as(u256, coefficient) << (8 * (exponent - 3));
     }
 
     pub fn targetToBits(target: u256) u32 {
         var as_bytes: [32]u8 = undefined;
-        std.mem.writeInt(u256, &as_bytes, target, .big);
-        const trimmed = std.mem.trimLeft(u8, &as_bytes, &[1]u8{0});
+        mem.writeInt(u256, &as_bytes, target, .big);
+        const trimmed = mem.trimLeft(u8, &as_bytes, &[1]u8{0});
         var exponent: u8 = undefined;
         var coefficient: [3]u8 = undefined;
         if ((trimmed[0] & 0b1000_0000) != 0) {
             exponent = @intCast(trimmed.len + 1);
-            coefficient = [1]u8{0x00} ++ std.mem.bytesAsValue([2]u8, trimmed[0..2]).*;
+            coefficient = [1]u8{0x00} ++ mem.bytesAsValue([2]u8, trimmed[0..2]).*;
         } else {
             exponent = @intCast(trimmed.len);
-            coefficient = std.mem.bytesAsValue([3]u8, trimmed[0..3]).*;
+            coefficient = mem.bytesAsValue([3]u8, trimmed[0..3]).*;
         }
-        std.mem.reverse(u8, &coefficient);
+        mem.reverse(u8, &coefficient);
         const new_bits = coefficient ++ [1]u8{exponent};
-        return std.mem.readInt(u32, &new_bits, .big);
+        return mem.readInt(u32, &new_bits, .big);
     }
 
     /// expects `time_diff` in seconds
@@ -847,37 +857,38 @@ pub const Block = struct {
     pub fn checkProofOfWork(self: *const Block) !bool {
         var hash_value: [32]u8 = undefined;
         try self.hash(&hash_value);
-        return std.mem.readInt(u256, &hash_value, .big) < Block.bitsToTarget(self.bits);
+        return mem.readInt(u256, &hash_value, .big) < Block.bitsToTarget(self.bits);
     }
 };
 
 //#region TESTS #########################################################################
 
 const expect = std.testing.expect;
+const t_alloc = std.testing.allocator;
 
 test "base58: encoding and decoding" {
     { // array/slice directly
         const u8_array = [8]u8{ 0x00, 0x00, 0x04, 0x09, 0x0a, 0x0f, 0x1a, 0xff };
         var buf: [10]u8 = undefined;
         const encoded_u8_array = Base58.encode(&u8_array, &buf);
-        try expect(std.mem.eql(u8, encoded_u8_array, "31Yr1PVY"));
+        try expect(mem.eql(u8, encoded_u8_array, "31Yr1PVY"));
 
         var decoding_buffer: [128]u8 = undefined;
         const decoded = Base58.decode(encoded_u8_array, &decoding_buffer);
-        try expect(std.mem.eql(u8, decoded, u8_array[2..]));
+        try expect(mem.eql(u8, decoded, u8_array[2..]));
     }
 
     { // number gets written as big endian
         const number: u256 = 0xf45e6907b16670196e487cf667e9fa510f0593276335da22311eb67c90d46421;
         var number_bytes: [32]u8 = undefined;
-        std.mem.writeInt(u256, &number_bytes, number, .big);
+        mem.writeInt(u256, &number_bytes, number, .big);
         var buf: [128]u8 = undefined;
         const encoded = Base58.encode(&number_bytes, &buf);
         try std.testing.expectEqualStrings("HSuyZVztYLpebSGXgjP5vaF4xZFxac8nXQY2m7QGSrVn", encoded);
 
         var decoding_buffer: [128]u8 = undefined;
         const decoded = Base58.decode(encoded, &decoding_buffer);
-        try expect(std.mem.eql(u8, &number_bytes, decoded));
+        try expect(mem.eql(u8, &number_bytes, decoded));
     }
 }
 
@@ -885,7 +896,7 @@ test "address:" {
     const prvk = 0x5da1cb5b4282e3f5c2314df81a3711fa7f0217401de5f72da0ab4906fab04f4c;
     var buf: [40]u8 = undefined;
     const address = Address.fromPrivkey(prvk, false, &buf);
-    try expect(std.mem.eql(u8, address, "1GHqmiofmT3PgrZDf7fcq632xybfg6onG4"));
+    try expect(mem.eql(u8, address, "1GHqmiofmT3PgrZDf7fcq632xybfg6onG4"));
 }
 
 test "tx: parse and serialize p2pkh transaction" {
@@ -906,11 +917,11 @@ test "tx: parse and serialize p2pkh transaction" {
         0x00, 0x00, 0x00, 0x00 // locktime
     };
     // zig fmt: on
-    const transaction = try Tx.parse(transaction_bytes[0..transaction_bytes.len]);
-    defer transaction.deinit();
+    const transaction = try Tx.parse(transaction_bytes[0..transaction_bytes.len], t_alloc);
+    defer transaction.deinit(t_alloc);
 
-    const serialized = try transaction.serialize(allocator);
-    defer allocator.free(serialized);
+    const serialized = try transaction.serialize(t_alloc);
+    defer t_alloc.free(serialized);
     try std.testing.expectEqualSlices(u8, transaction_bytes[0..transaction_bytes.len], serialized);
 }
 
@@ -935,8 +946,8 @@ test "tx: parse p2wpkh transaction" {
         0x00, 0x00, 0x00, 0x00 // locktime
     };
     // zig fmt: on
-    const transaction = try Tx.parse(transaction_bytes[0..transaction_bytes.len]);
-    defer transaction.deinit();
+    const transaction = try Tx.parse(transaction_bytes[0..transaction_bytes.len], t_alloc);
+    defer transaction.deinit(t_alloc);
     try expect(transaction.inputs.len == 1);
     try expect(transaction.outputs.len == 2);
     try expect(transaction.outputs[1].amount == 6272);
@@ -954,8 +965,8 @@ test "script: Opcode.isSupported" {
 test "script: Script parsing" {
     const Op = Script.Opcode;
     const script_bytes = [34]u8{ Op.OP_1, 0x20, 0xaa, 0xc3, 0x5f, 0xe9, 0x1f, 0x20, 0xd4, 0x88, 0x16, 0xb3, 0xc8, 0x30, 0x11, 0xd1, 0x17, 0xef, 0xa3, 0x5a, 0xcd, 0x24, 0x14, 0xd3, 0x6c, 0x1e, 0x02, 0xb0, 0xf2, 0x9f, 0xc3, 0x10, 0x6d, 0x90 };
-    const script = try Script.parse(script_bytes[0..]);
-    defer script.deinit();
+    const script = try Script.parse(script_bytes[0..], t_alloc);
+    defer script.deinit(t_alloc);
     try expect(script.instructions.len == 2);
     try expect(script.instructions[0].opcode == Op.OP_1);
     try expect(script.instructions[1].data.len == 32);
@@ -972,7 +983,7 @@ test "script: Basic script execution" {
     const Op = Script.Opcode;
     const script_pub_key = [_]u8{Op.OP_SHA256} ++ [1]u8{answer_hash.len} ++ answer_hash ++ [_]u8{ Op.OP_EQUAL, Op.OP_VERIFY };
     const script_sig = [_]u8{Op.OP_PUSHDATA1} ++ [1]u8{answer.len} ++ answer.*;
-    try expect(try Script.validate(&script_sig, &script_pub_key, null, null));
+    try expect(try Script.validate(&script_sig, &script_pub_key, null, null, t_alloc));
 }
 
 test "tx: transaction signing and checksig" {
@@ -984,10 +995,17 @@ test "tx: transaction signing and checksig" {
     const prev_script_pubkey = [_]u8{ 0x76, 0xa9, 0x14, 0xaf, 0x72, 0x4f, 0xc6, 0x1f, 0x4d, 0x5c, 0x4d, 0xb0, 0x6b, 0x33, 0x95, 0xc9, 0xb4, 0x50, 0xa8, 0x0d, 0x25, 0xb6, 0x73, 0x88, 0xac };
     const target_address = "mnvfTUzPbeWBxwxinm37C1bsQ5ckZuN9E7";
 
-    var transaction = try Tx.initP2PKH(true, prev_txid, 1, 5000, target_address);
-    defer transaction.deinit();
+    var transaction = try Tx.initP2PKH( .{
+        .testnet = true,
+        .prev_txid = prev_txid,
+        .prev_output_index = 1,
+        .amount = 5000,
+        .target_address = target_address,
+        .alloc = t_alloc,
+    });
+    defer transaction.deinit(t_alloc);
 
-    try transaction.sign(privkey, 0, &prev_script_pubkey);
+    try transaction.sign(privkey, 0, &prev_script_pubkey, t_alloc);
 
     // CHECKSIG Verifying
     const checksig = try Tx.checksig(
@@ -997,6 +1015,7 @@ test "tx: transaction signing and checksig" {
         transaction.inputs[0].script_sig[1..][0..(transaction.inputs[0].script_sig[0])],
         //transaction.witness.?[0], // or above
         &prev_script_pubkey,
+        t_alloc,
     );
 
     try std.testing.expect(checksig);
@@ -1004,7 +1023,8 @@ test "tx: transaction signing and checksig" {
 
 test "block: isCoinbase" {
     const tx_bytes = [_]u8{ 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0x5e, 0x03, 0xd7, 0x1b, 0x07, 0x25, 0x4d, 0x69, 0x6e, 0x65, 0x64, 0x20, 0x62, 0x79, 0x20, 0x41, 0x6e, 0x74, 0x50, 0x6f, 0x6f, 0x6c, 0x20, 0x62, 0x6a, 0x31, 0x31, 0x2f, 0x45, 0x42, 0x31, 0x2f, 0x41, 0x44, 0x36, 0x2f, 0x43, 0x20, 0x59, 0x14, 0x29, 0x31, 0x01, 0xfa, 0xbe, 0x6d, 0x6d, 0x67, 0x8e, 0x2c, 0x8c, 0x34, 0xaf, 0xc3, 0x68, 0x96, 0xe7, 0xd9, 0x40, 0x28, 0x24, 0xed, 0x38, 0xe8, 0x56, 0x67, 0x6e, 0xe9, 0x4b, 0xfd, 0xb0, 0xc6, 0xc4, 0xbc, 0xd8, 0xb2, 0xe5, 0x66, 0x6a, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc7, 0x27, 0x00, 0x00, 0xa5, 0xe0, 0x0e, 0x00, 0xff, 0xff, 0xff, 0xff, 0x01, 0xfa, 0xf2, 0x0b, 0x58, 0x00, 0x00, 0x00, 0x00, 0x19, 0x76, 0xa9, 0x14, 0x33, 0x8c, 0x84, 0x84, 0x94, 0x23, 0x99, 0x24, 0x71, 0xbf, 0xfb, 0x1a, 0x54, 0xa8, 0xd9, 0xb1, 0xd6, 0x9d, 0xc2, 0x8a, 0x88, 0xac, 0x00, 0x00, 0x00, 0x00 };
-    const tx = try Tx.parse(&tx_bytes);
+    const tx = try Tx.parse(&tx_bytes, t_alloc);
+    defer tx.deinit(t_alloc);
     try expect(tx.isCoinbase() == true);
 }
 
@@ -1012,9 +1032,9 @@ test "block: Block parse" {
     const block_raw = [_]u8{ 0x02, 0x00, 0x00, 0x20, 0x8e, 0xc3, 0x94, 0x28, 0xb1, 0x73, 0x23, 0xfa, 0x0d, 0xde, 0xc8, 0xe8, 0x87, 0xb4, 0xa7, 0xc5, 0x3b, 0x8c, 0x0a, 0x0a, 0x22, 0x0c, 0xfd, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x5b, 0x07, 0x50, 0xfc, 0xe0, 0xa8, 0x89, 0x50, 0x2d, 0x40, 0x50, 0x8d, 0x39, 0x57, 0x68, 0x21, 0x15, 0x5e, 0x9c, 0x9e, 0x3f, 0x5c, 0x31, 0x57, 0xf9, 0x61, 0xdb, 0x38, 0xfd, 0x8b, 0x25, 0xbe, 0x1e, 0x77, 0xa7, 0x59, 0xe9, 0x3c, 0x01, 0x18, 0xa4, 0xff, 0xd7, 0x1d };
     const block = try Block.parse(&block_raw);
     try expect(block.version == 0x20000002);
-    const expected_prev_block = std.mem.readInt(u256, &[_]u8{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xfd, 0x0c, 0x22, 0x0a, 0x0a, 0x8c, 0x3b, 0xc5, 0xa7, 0xb4, 0x87, 0xe8, 0xc8, 0xde, 0x0d, 0xfa, 0x23, 0x73, 0xb1, 0x28, 0x94, 0xc3, 0x8e }, .big);
+    const expected_prev_block = mem.readInt(u256, &[_]u8{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xfd, 0x0c, 0x22, 0x0a, 0x0a, 0x8c, 0x3b, 0xc5, 0xa7, 0xb4, 0x87, 0xe8, 0xc8, 0xde, 0x0d, 0xfa, 0x23, 0x73, 0xb1, 0x28, 0x94, 0xc3, 0x8e }, .big);
     try expect(block.prev_block == expected_prev_block);
-    const expected_merkle_root = std.mem.readInt(u256, &[_]u8{ 0xbe, 0x25, 0x8b, 0xfd, 0x38, 0xdb, 0x61, 0xf9, 0x57, 0x31, 0x5c, 0x3f, 0x9e, 0x9c, 0x5e, 0x15, 0x21, 0x68, 0x57, 0x39, 0x8d, 0x50, 0x40, 0x2d, 0x50, 0x89, 0xa8, 0xe0, 0xfc, 0x50, 0x07, 0x5b }, .big);
+    const expected_merkle_root = mem.readInt(u256, &[_]u8{ 0xbe, 0x25, 0x8b, 0xfd, 0x38, 0xdb, 0x61, 0xf9, 0x57, 0x31, 0x5c, 0x3f, 0x9e, 0x9c, 0x5e, 0x15, 0x21, 0x68, 0x57, 0x39, 0x8d, 0x50, 0x40, 0x2d, 0x50, 0x89, 0xa8, 0xe0, 0xfc, 0x50, 0x07, 0x5b }, .big);
     try expect(block.merkle_root == expected_merkle_root);
     try expect(block.timestamp == 0x59a7771e);
     try expect(block.bits == 0xe93c0118);

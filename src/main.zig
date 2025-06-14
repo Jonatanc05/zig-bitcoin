@@ -3,7 +3,7 @@ const Bitcoin = @import("bitcoin.zig");
 const Network = @import("network.zig");
 const GenericWriter = std.io.GenericWriter;
 const GenericReader = std.io.GenericReader;
-const alloc = std.heap.page_allocator;
+const allocator = std.heap.page_allocator;
 
 pub fn main() !void {
     const stdout = std.io.getStdOut().writer();
@@ -23,20 +23,20 @@ pub fn main() !void {
             '1' => try @import("report.zig").print(privkey),
             '2' => {
                 var tx = try promptTransaction();
-                defer tx.deinit();
+                defer tx.deinit(allocator);
                 const input_index = 0;
                 var prompt_buf: [256]u8 = undefined;
                 const prev_pubkey = try promptBytesHex(&prompt_buf, "Previous pubkey");
-                try tx.sign(privkey, input_index, prev_pubkey);
-                const bytes = try tx.serialize(alloc);
-                defer alloc.free(bytes);
+                try tx.sign(privkey, input_index, prev_pubkey, allocator);
+                const bytes = try tx.serialize(allocator);
+                defer allocator.free(bytes);
                 try stdout.print("\nTransaction:\n{}\n", .{std.fmt.fmtSliceHexLower(bytes)});
             },
             '3' => {
                 //const targetIpAddress = std.net.Address{ .in = .init([_]u8{74,220,255,190},8333) };//try promptIpAddress();
                 //const targetIpAddress = std.net.Address{ .in = .init([_]u8{58,96,123,120},8333) };//try promptIpAddress();
                 const targetIpAddress = try promptIpAddress();
-                const connection = try Network.Node.connect(targetIpAddress, alloc);
+                const connection = try Network.Node.connect(targetIpAddress, allocator);
                 try stdout.print("\nConnection established successfully with \nIP: {any}\nUser Agent: {s}\n", .{ connection.peer_address, connection.user_agent });
             },
             '4' => break,
@@ -58,7 +58,14 @@ fn promptTransaction() !Bitcoin.Tx {
     const prev_output_index = try promptInt(u32, "Previous output index", .{});
     const amount = try promptInt(u64, "Amount to send", .{});
     const target_address = try promptString(&buf2, "Target address");
-    return try Bitcoin.Tx.initP2PKH(testnet, prev_txid, prev_output_index, amount, target_address);
+    return try Bitcoin.Tx.initP2PKH( .{
+        .testnet = testnet,
+	.prev_txid = prev_txid,
+	.prev_output_index = prev_output_index,
+	.amount = amount,
+	.target_address = target_address,
+        .alloc = allocator,
+    });
 }
 
 fn promptBool(msg: []const u8) !bool {

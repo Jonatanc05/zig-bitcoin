@@ -100,9 +100,9 @@ pub const Address = struct {
     pub fn fromPubkey(pubkey: EllipticCurveLib.CurvePoint(u256), testnet: bool, buf: []u8) []u8 {
         const hash160_data: [21]u8 = hash160_data: {
             var hash160_data: [21]u8 = undefined;
-            var serializedPoint: [33]u8 = undefined;
-            pubkey.serialize(true, &serializedPoint);
-            hash160(&serializedPoint, hash160_data[1..]);
+            var serialized_point: [33]u8 = undefined;
+            pubkey.serialize(true, &serialized_point);
+            hash160(&serialized_point, hash160_data[1..]);
             hash160_data[0] = if (testnet) 0x6f else 0x00;
             break :hash160_data hash160_data;
         };

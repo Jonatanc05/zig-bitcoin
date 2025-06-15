@@ -192,13 +192,13 @@ pub const Protocol = struct {
                 };
 
                 const length = reader.readInt(u32, .little);
-                _ = length;
                 res.bytes_read_count += 4;
 
                 var chcksum: [4]u8 = undefined;
                 reader.readBytes(&chcksum);
                 res.bytes_read_count += 4;
 
+                const payload_bytes = reader.data[reader.index..][0..length]; // for checksum
                 var out = &res.value.version;
 
                 out.version = reader.readInt(i32, .little);
@@ -240,16 +240,14 @@ pub const Protocol = struct {
                 out.relay = (reader.readInt(u8, .little)) > 0;
                 res.bytes_read_count += 1;
 
-                // TODO checksum validation
-                //var hash: [32]u8 = undefined;
-                //const bytes_ptr = @as([*]u8, @ptrCast(@alignCast(std.mem.asBytes(&out))));
-
-                //Sha256.hash(bytes_ptr[0..@sizeOf(@TypeOf(out.*))], &hash, .{});
-                //Sha256.hash(&hash, &hash, .{});
-                //const expected_checksum: [4]u8 = hash[0..4].*;
-                //if (!std.mem.eql(u8, &chcksum, &expected_checksum)) {
-                //    return error.ChecksumMismatch;
-                //}
+                // checksum validation
+                var hash: [32]u8 = undefined;
+                Sha256.hash(payload_bytes, &hash, .{});
+                Sha256.hash(&hash, &hash, .{});
+                const expected_checksum: []u8 = hash[0..4];
+                if (!std.mem.eql(u8, &chcksum, expected_checksum)) {
+                    return error.ChecksumMismatch;
+                }
 
                 return res;
             }
@@ -340,34 +338,68 @@ pub const Protocol = struct {
         comptime {
             const T = Protocol.Message;
 
-            const Function = struct {
-                mandatory: bool,
+            const ExpectedFunction = struct {
+                is_mandatory: bool,
                 name: []const u8,
                 return_type: type,
                 params: []const type,
             };
-            const functions = .{
-                Function{ .mandatory = true, .name = "serialize", .return_type = anyerror!void, .params = &[_]type{ void, std.io.AnyWriter } },
-                Function{ .mandatory = true, .name = "parse", .return_type = anyerror!Protocol.Message.ParseResult, .params = &[_]type{ []const u8, std.mem.Allocator } },
-                Function{ .mandatory = false, .name = "deinit", .return_type = void, .params = &[_]type{std.mem.Allocator} },
+            const expected_functions = .{
+                ExpectedFunction{
+                    .is_mandatory = true,
+                    .name = "serialize",
+                    .return_type = anyerror!void,
+                    .params = &[_]type{ void, std.io.AnyWriter },
+                },
+                ExpectedFunction{
+                    .is_mandatory = true,
+                    .name = "parse",
+                    .return_type = anyerror!Protocol.Message.ParseResult,
+                    .params = &[_]type{ []const u8, std.mem.Allocator },
+                },
+                ExpectedFunction{
+                    .is_mandatory = false,
+                    .name = "deinit",
+                    .return_type = void,
+                    .params = &[_]type{void, std.mem.Allocator},
+                },
             };
 
             for (@typeInfo(T).@"union".fields) |field| {
-                for (functions) |function| {
-                    if (!@hasDecl(field.type, function.name)) {
-                        if (function.mandatory) {
+                for (expected_functions) |expected| {
+                    // check existance
+                    if (!@hasDecl(field.type, expected.name)) {
+                        if (expected.is_mandatory) {
                             var buf: [200]u8 = undefined;
-                            @compileError(std.fmt.bufPrint(&buf, "A {} function is required for {}.{}", .{ function.name, @typeName(T), field.name }) catch "E879234");
+                            @compileError(std.fmt.bufPrint(&buf, "A {} function is required for {}.{}", .{ expected.name, @typeName(T), field.name }) catch "E879234");
                         } else continue;
                     }
-                    const pf = @field(field.type, function.name);
-                    const fn_info = @typeInfo(@TypeOf(pf)).@"fn";
-                    if (fn_info.return_type != function.return_type) {
-                        var buf: [200]u8 = undefined;
-                        @compileError(std.fmt.bufPrint(&buf, "The function {s}.{s}.{s} has the wrong signature. Should be: fn {s}({d}) {s}", .{ @typeName(T), field.name, function.name, function.name, function.params.len, @typeName(function.return_type) }) catch "E1293485");
-                    }
 
-                    // TODO check parameters and ignore when void
+                    const fn_decl = @field(field.type, expected.name);
+                    const fn_info = @typeInfo(@TypeOf(fn_decl)).@"fn";
+                    const SignatureMismatch = struct {
+                        fn throw() void {
+                            var buf: [300]u8 = undefined;
+                            @compileError(std.fmt.bufPrint(
+                                &buf,
+                                "The function {s}.{s}.{s} has the wrong signature. Should be: fn {s}({d}) {s} (also check parameter types)",
+                                .{ @typeName(T), field.name, expected.name, expected.name, expected.params.len, @typeName(expected.return_type) },
+                            ) catch "E1293485");
+                        }
+                    };
+
+                    // check return_type
+                    if (fn_info.return_type != expected.return_type)
+                        SignatureMismatch.throw();
+
+                    if (fn_info.params.len != expected.params.len)
+                        SignatureMismatch.throw();
+
+                    for (fn_info.params, expected.params) |p_actual, p_expected| {
+                        if (p_expected == void) continue; // void means ignore
+                        if (p_actual.type != p_expected)
+                            SignatureMismatch.throw();
+                    }
                 }
             }
         }
@@ -414,19 +446,22 @@ pub const Protocol = struct {
             assert(try reader.readAll(&command) == 12);
             res.bytes_read_count += 12;
 
-            // setup a map of functions by name
             assert(res.bytes_read_count == 16);
             const first_zero_index: usize = for (command, 0..) |c, i| {
                 if (c == 0) break i;
             } else 12;
-            const tagName = command[0..first_zero_index];
+            const tag_name = command[0..first_zero_index];
+            var supported_command = false;
             inline for (@typeInfo(Message).@"union".fields) |field| {
-                if (std.mem.eql(u8, field.name, tagName)) {
-                    const version_res = try field.type.parse(bytes[res.bytes_read_count..], alloc);
-                    res.value = version_res.value;
-                    res.bytes_read_count += version_res.bytes_read_count;
+                if (std.mem.eql(u8, field.name, tag_name)) {
+                    supported_command = true;
+                    const msg_parse_result = try field.type.parse(bytes[res.bytes_read_count..], alloc);
+                    res.value = msg_parse_result.value;
+                    res.bytes_read_count += msg_parse_result.bytes_read_count;
                 }
             }
+
+            if (!supported_command) return error.UnsupportedCommandReceived;
 
             return res;
         }
@@ -535,7 +570,7 @@ pub const Node = struct {
         };
     }
 
-    /// Synchronously waits to receive bytes. Caller should call .deinit() returned value
+    /// Synchronously waits to receive bytes. Caller should call .deinit() on returned value
     pub fn readMessage(connection: Connection, alloc: std.mem.Allocator) !Protocol.Message {
         const header_len = 24;
         var buffer = ([1]u8{0} ** header_len) ++ ([1]u8{0} ** (1024 * 256));

@@ -230,7 +230,7 @@ pub const Tx = struct {
         }
     }
 
-    fn hashForSigning(self: *const Tx, input_index: usize, hashtype: u8, prev_script_pubkey: []const u8, alloc: mem.Allocator) !u256 {
+    fn hashForSigning(self: *const Tx, input_index: usize, hashtype: u8, prev_script_pubkey: []const u8, alloc: mem.Allocator) mem.Allocator.Error!u256 {
         var empty_script = [1]u8{0};
         const tx_copy = tx_copy: {
             var temp: *Tx = try alloc.create(Tx);
@@ -317,7 +317,7 @@ pub const Tx = struct {
         return transaction.checksig(input_index, pubkey, signature, script);
     }
 
-    pub fn checksig(transaction: *const Tx, input_index: usize, pubkey: []const u8, signature: []const u8, script: []const u8, alloc: mem.Allocator) !bool {
+    pub fn checksig(transaction: *const Tx, input_index: usize, pubkey: []const u8, signature: []const u8, script: []const u8, alloc: mem.Allocator) mem.Allocator.Error!bool {
         const hashtype = signature[signature.len - 1];
         const sig = signature[0 .. signature.len - 1];
 
@@ -327,44 +327,45 @@ pub const Tx = struct {
     }
 
     /// Returns a slice owned by the caller
-    pub fn serialize(self: *const Tx, alloc: mem.Allocator) ![]u8 {
+    pub fn serialize(self: *const Tx, alloc: mem.Allocator) mem.Allocator.Error![]u8 {
         var bytes = try std.ArrayList(u8).initCapacity(alloc, 100);
         defer bytes.deinit();
 
         const writer = bytes.writer();
 
-        try writer.writeInt(u32, self.version, .little);
+        writer.writeInt(u32, self.version, .little) catch return mem.Allocator.Error.OutOfMemory;
+
 
         if (self.witness != null) {
-            try writer.writeByte(0);
-            try writer.writeByte(1);
+            writer.writeByte(0) catch return mem.Allocator.Error.OutOfMemory;
+            writer.writeByte(1) catch return mem.Allocator.Error.OutOfMemory;
         }
 
-        try Aux.writeVarint(writer.any(), @intCast(self.inputs.len));
+        Aux.writeVarint(writer.any(), @intCast(self.inputs.len)) catch return mem.Allocator.Error.OutOfMemory;
         for (self.inputs) |input| {
-            try writer.writeInt(u256, input.txid, .little);
-            try writer.writeInt(u32, input.index, .little);
-            try Aux.writeVarint(writer.any(), @intCast(input.script_sig.len));
-            try writer.writeAll(input.script_sig);
-            try writer.writeInt(u32, input.sequence, .little);
+            writer.writeInt(u256, input.txid, .little) catch return mem.Allocator.Error.OutOfMemory;
+            writer.writeInt(u32, input.index, .little) catch return mem.Allocator.Error.OutOfMemory;
+            Aux.writeVarint(writer.any(), @intCast(input.script_sig.len)) catch return mem.Allocator.Error.OutOfMemory;
+            writer.writeAll(input.script_sig) catch return mem.Allocator.Error.OutOfMemory;
+            writer.writeInt(u32, input.sequence, .little) catch return mem.Allocator.Error.OutOfMemory;
         }
 
-        try Aux.writeVarint(writer.any(), @intCast(self.outputs.len));
+        Aux.writeVarint(writer.any(), @intCast(self.outputs.len)) catch return mem.Allocator.Error.OutOfMemory;
         for (self.outputs) |output| {
             try writer.writeInt(u64, output.amount, .little);
-            try Aux.writeVarint(writer.any(), @intCast(output.script_pubkey.len));
+            Aux.writeVarint(writer.any(), @intCast(output.script_pubkey.len)) catch return mem.Allocator.Error.OutOfMemory;
             try writer.writeAll(output.script_pubkey);
         }
 
         if (self.witness) |witness| {
-            try Aux.writeVarint(writer.any(), @intCast(witness.len));
+            Aux.writeVarint(writer.any(), @intCast(witness.len)) catch return mem.Allocator.Error.OutOfMemory;
             for (witness) |item| {
-                try Aux.writeVarint(writer.any(), @intCast(item.len));
+                Aux.writeVarint(writer.any(), @intCast(item.len)) catch return mem.Allocator.Error.OutOfMemory;
                 try writer.writeAll(item);
             }
         } else {
             // MrRGnome said non-segwit transactions also have witness???
-            //try Aux.writeVarint(writer.any(), 0);
+            //Aux.writeVarint(writer.any(), 0) ;
         }
 
         try writer.writeInt(u32, self.locktime, .little);
@@ -495,6 +496,9 @@ pub const Script = struct {
         /// Points to first empty index
         top: usize = 0,
 
+        /// null alloc means the stack is not allowed to grow implicitly
+        alloc: ?mem.Allocator = null,
+
         const MAX_STACK_ELEMENT_SIZE: usize = 520;
 
         ///Same behaviour as Bitcoin Core:
@@ -512,11 +516,21 @@ pub const Script = struct {
             return .{ .data = try alloc.alloc(u8, size) };
         }
 
-        fn deinit(self: *Self, alloc: mem.Allocator) void {
+        fn deinit(self: *const Self, alloc: mem.Allocator) void {
             alloc.free(self.data);
         }
 
-        fn push(self: *Self, value: []const u8) void {
+        /// Calling this function means the stack will be able to grow implicitly when pushing more than bytes than it fits
+        fn setAlloc(self: *Self, alloc: mem.Allocator) void {
+            self.alloc = alloc;
+        }
+
+        /// Can call realloc implicitly if self.alloc != null
+        fn push(self: *Self, value: []const u8) PushError!void {
+            while (self.top + value.len > self.data.len) {
+                if (self.alloc == null) return error.StackFull; // not allowed to realloc
+                self.data = try self.alloc.?.realloc(self.data, self.data.len * 2);
+            }
             mem.copyForwards(u8, self.data[self.top..][0..value.len], value);
             self.top += value.len;
             if (value.len > std.math.maxInt(u8))
@@ -524,11 +538,13 @@ pub const Script = struct {
             self.data[self.top] = @intCast(value.len);
             self.top += 1;
         }
+        const PushError = error{StackFull}||mem.Allocator.Error;
 
-        fn pushInt(self: *Self, value: Self.Int) void {
-            self.push(mem.asBytes(&value));
+        fn pushInt(self: *Self, value: Self.Int) PushError!void {
+            try self.push(mem.asBytes(&value));
         }
 
+        /// Currently doesn't realloc to shrink
         fn pop(self: *Self, buffer: []u8) PopError![]u8 {
             if (self.top == 0)
                 return PopError.EmptyStack;
@@ -547,11 +563,15 @@ pub const Script = struct {
         }
         const PopError = error{ EmptyStack, Corrupted, OutBufferTooSmall };
 
-        fn popInt(self: *Self) PopIntError!Self.Int {
+        fn popInt(self: *Self) error{ EmptyStack, Corrupted, NotAnOperableInteger }!Self.Int {
             var buffer_data: [4]u8 = undefined;
-            const data = try self.pop(&buffer_data);
+            const data = self.pop(&buffer_data) catch |err| return switch (err) {
+                PopError.OutBufferTooSmall => error.Corrupted,
+                PopError.EmptyStack => error.EmptyStack,
+                PopError.Corrupted => error.Corrupted,
+            };
             if (data.len > 4) {
-                return PopIntError.NotAnOperableInteger;
+                return error.NotAnOperableInteger;
             } else if (data.len == 4) {
                 const data_as_unsigned = mem.readInt(u32, data[0..4], .big);
                 const sign_as_int: Self.Int = if (data_as_unsigned & 0x80000000 != 0) -1 else 1;
@@ -562,10 +582,10 @@ pub const Script = struct {
                 // when less than 4 bytes, the value can't be signed
                 return @as(Self.Int, @intCast(data[0]));
             } else {
+                // TODO
                 @panic("Not handling this case yet: popping more than 1 but less than 4 bytes");
             }
         }
-        const PopIntError = PopError || error{NotAnOperableInteger};
 
         /// Only false when top value is existent AND not true.
         /// Zero, negative zero and empty array are all treated as false.
@@ -639,25 +659,41 @@ pub const Script = struct {
         }
     };
 
-    pub fn run(script: []const u8, stack: *Stack, transaction: ?*Tx, input_index: ?usize, alloc: mem.Allocator) !void {
+    const RunError = mem.Allocator.Error || error {
+        Internal,
+        BadScript,
+        StackFull,
+        VerifyFailed,
+    };
+    pub fn run(script: []const u8, stack: *Stack, transaction: ?*Tx, input_index: ?usize, alloc: mem.Allocator) RunError!void {
         const Op = Opcode;
+        const Local = struct {
+            fn handlePopError(err: Stack.PopError) !void {
+                switch (err) {
+                    error.OutBufferTooSmall => return error.Internal,
+                    error.Corrupted,
+                    error.EmptyStack => return error.BadScript,
+                }
+            }
+        };
+
         var scriptReader = Cursor.init(script);
         while (!scriptReader.ended()) {
             const opcode = scriptReader.readInt(u8, .little);
             switch (opcode) {
                 0x01...0x4b => { // Data
-                    stack.push(script[scriptReader.index..][0..opcode]);
+                    try stack.push(script[scriptReader.index..][0..opcode]);
                     scriptReader.index += @intCast(opcode);
                 },
                 Op.OP_0 => {
-                    stack.push(&[_]u8{});
+                    try stack.push(&[_]u8{});
                 },
                 Op.OP_1...Op.OP_16 => { // OP_1 to OP_16
-                    stack.push(&[1]u8{opcode - 0x50});
+                    try stack.push(&[1]u8{opcode - 0x50});
                 },
                 Op.OP_PUSHDATA1 => {
                     const size = scriptReader.readInt(u8, .little);
-                    stack.push(script[scriptReader.index..][0..size]);
+                    try stack.push(script[scriptReader.index..][0..size]);
                     scriptReader.index += @intCast(size);
                 },
                 Op.OP_VERIFY => {
@@ -667,84 +703,84 @@ pub const Script = struct {
                 Op.OP_2DUP => {
                     var buffer_a: [Stack.MAX_STACK_ELEMENT_SIZE]u8 = undefined;
                     var buffer_b: [Stack.MAX_STACK_ELEMENT_SIZE]u8 = undefined;
-                    const a = try stack.pop(&buffer_a);
-                    const b = try stack.pop(&buffer_b);
-                    stack.push(a);
-                    stack.push(b);
-                    stack.push(a);
-                    stack.push(b);
+                    const a = stack.pop(&buffer_a) catch |err| return Local.handlePopError(err);
+                    const b = stack.pop(&buffer_b) catch |err| return Local.handlePopError(err);
+                    try stack.push(a);
+                    try stack.push(b);
+                    try stack.push(a);
+                    try stack.push(b);
                 },
                 Op.OP_DUP => {
                     var buffer_value: [Stack.MAX_STACK_ELEMENT_SIZE]u8 = undefined;
-                    const value = try stack.pop(&buffer_value);
-                    stack.push(value);
-                    stack.push(value);
+                    const value = stack.pop(&buffer_value) catch |err| return Local.handlePopError(err);
+                    try stack.push(value);
+                    try stack.push(value);
                 },
                 Op.OP_EQUAL => {
                     var buffer_a: [Stack.MAX_STACK_ELEMENT_SIZE]u8 = undefined;
                     var buffer_b: [Stack.MAX_STACK_ELEMENT_SIZE]u8 = undefined;
-                    const a = try stack.pop(&buffer_a);
-                    const b = try stack.pop(&buffer_b);
+                    const a = stack.pop(&buffer_a) catch |err| return Local.handlePopError(err);
+                    const b = stack.pop(&buffer_b) catch |err| return Local.handlePopError(err);
                     const eq: u8 = if (mem.eql(u8, a, b)) 1 else 0;
-                    stack.push(&[1]u8{eq});
+                    try stack.push(&[1]u8{eq});
                 },
                 Op.OP_EQUALVERIFY => {
                     var buffer_a: [Stack.MAX_STACK_ELEMENT_SIZE]u8 = undefined;
                     var buffer_b: [Stack.MAX_STACK_ELEMENT_SIZE]u8 = undefined;
-                    const a = try stack.pop(&buffer_a);
-                    const b = try stack.pop(&buffer_b);
+                    const a = stack.pop(&buffer_a) catch |err| return Local.handlePopError(err);
+                    const b = stack.pop(&buffer_b) catch |err| return Local.handlePopError(err);
                     if (!mem.eql(u8, a, b)) {
                         return error.VerifyFailed;
                     }
                 },
                 Op.OP_NOT => {
                     var buffer_value: [Stack.MAX_STACK_ELEMENT_SIZE]u8 = undefined;
-                    const value = try stack.pop(&buffer_value);
+                    const value = stack.pop(&buffer_value) catch |err| return Local.handlePopError(err);
                     const equals_zero: u8 = for (value) |byte| {
                         if (byte != 0) break 0;
                     } else 1;
-                    stack.push(&[1]u8{equals_zero});
+                    try stack.push(&[1]u8{equals_zero});
                 },
                 Op.OP_ADD => {
                     const a: i64 = stack.popInt() catch return error.BadScript;
                     const b: i64 = stack.popInt() catch return error.BadScript;
                     const value: i64 = a + b;
-                    stack.pushInt(value);
+                    try stack.pushInt(value);
                 },
                 Op.OP_SUB => {
                     const a: i64 = stack.popInt() catch return error.BadScript;
                     const b: i64 = stack.popInt() catch return error.BadScript;
                     const value: i64 = a - b;
-                    stack.pushInt(value);
+                    try stack.pushInt(value);
                 },
                 Op.OP_SHA256 => {
                     var buffer_value: [Stack.MAX_STACK_ELEMENT_SIZE]u8 = undefined;
-                    const value = try stack.pop(&buffer_value);
+                    const value = stack.pop(&buffer_value) catch |err| return Local.handlePopError(err);
                     var value_hash: [32]u8 = undefined;
                     Sha256.hash(value, &value_hash, .{});
-                    stack.push(&value_hash);
+                    try stack.push(&value_hash);
                 },
                 Op.OP_HASH160 => {
                     var buffer_value: [Stack.MAX_STACK_ELEMENT_SIZE]u8 = undefined;
-                    const value = stack.pop(&buffer_value) catch |err| {
-                        if (err == error.OutBufferTooSmall) @panic("Not handling HASH160 for stack items larger than 520 bytes");
-                        return error.BadScript;
-                    };
+                    const value = stack.pop(&buffer_value) catch |err| return switch (err) {
+                            Stack.PopError.OutBufferTooSmall => @panic("Not handling HASH160 for stack items larger than 520 bytes"),
+                            else => Local.handlePopError(err),
+                        };
                     var hash160_data: [20]u8 = undefined;
                     hash160(value, &hash160_data);
-                    stack.push(&hash160_data);
+                    try stack.push(&hash160_data);
                 },
                 Op.OP_CHECKSIG => {
                     if (transaction == null) @panic("Trying to execute OP_CHECKSIG with a null transaction");
                     if (input_index == null) @panic("Trying to execute OP_CHECKSIG with a null input_index");
                     var buffer_pubkey: [Stack.MAX_STACK_ELEMENT_SIZE]u8 = undefined;
                     var buffer_signature: [Stack.MAX_STACK_ELEMENT_SIZE]u8 = undefined;
-                    const pubkey = try stack.pop(&buffer_pubkey);
-                    const signature = try stack.pop(&buffer_signature);
+                    const pubkey = stack.pop(&buffer_pubkey) catch |err| return Local.handlePopError(err);
+                    const signature = stack.pop(&buffer_signature) catch |err| return Local.handlePopError(err);
                     if (try Tx.checksig(transaction.?, input_index.?, pubkey, signature, script, alloc)) {
-                        stack.push(&[1]u8{1});
+                        try stack.push(&[1]u8{1});
                     } else {
-                        stack.push(&[1]u8{0});
+                        try stack.push(&[1]u8{0});
                     }
                 },
                 else => {
@@ -757,12 +793,27 @@ pub const Script = struct {
         }
     }
 
-    pub fn validate(scriptSig: []const u8, scriptPubKey: []const u8, transaction: ?*Tx, input_index: ?usize, alloc: mem.Allocator) !bool {
-        var stack = try Stack.init(scriptSig.len + scriptPubKey.len, alloc); // @TODO is this reasonable?
+    pub const Error = error{Internal}||mem.Allocator.Error;
+    pub fn validate(scriptSig: []const u8, scriptPubKey: []const u8, transaction: ?*Tx, input_index: ?usize, alloc: mem.Allocator)
+    Error!bool {
+        var stack = try Stack.init(scriptSig.len + scriptPubKey.len, alloc);
         defer stack.deinit(alloc);
+        stack.setAlloc(alloc);
 
-        Script.run(scriptSig, &stack, transaction, input_index, alloc) catch return false;
-        Script.run(scriptPubKey, &stack, transaction, input_index, alloc) catch return false;
+        const Local = struct {
+            fn handleError(err: Script.RunError) !bool {
+                return switch (err) {
+                    error.Internal,
+                    error.StackFull => error.Internal,
+                    mem.Allocator.Error.OutOfMemory => error.OutOfMemory,
+                    error.BadScript,
+                    error.VerifyFailed => false,
+                };
+            }
+        };
+
+        Script.run(scriptSig, &stack, transaction, input_index, alloc) catch |err| return Local.handleError(err);
+        Script.run(scriptPubKey, &stack, transaction, input_index, alloc) catch |err| return Local.handleError(err);
 
         return stack.verify();
     }

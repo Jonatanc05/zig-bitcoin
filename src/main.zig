@@ -3,7 +3,7 @@ const Bitcoin = @import("bitcoin.zig");
 const Network = @import("network.zig");
 const GenericWriter = std.io.GenericWriter;
 const GenericReader = std.io.GenericReader;
-const allocator = std.heap.page_allocator;
+const builtin = @import("builtin");
 
 pub fn main() !void {
     const stdout = std.io.getStdOut().writer();
@@ -12,6 +12,21 @@ pub fn main() !void {
     var addr_buf: [40]u8 = undefined;
     const address = Bitcoin.Address.fromPrivkey(privkey, true, &addr_buf);
     try stdout.print("\nYour address is {s}\n", .{address});
+
+    const allocator, var debug: ?std.heap.DebugAllocator(.{}) = blk: {
+        if (builtin.mode == .Debug) {
+            var gpa = std.heap.DebugAllocator(.{}).init;
+            break :blk .{ gpa.allocator(), gpa };
+        }
+        break :blk .{ std.heap.smp_allocator, null };
+    };
+
+    defer if (debug != null) {
+        if (debug.?.deinit() == .leak) {
+            @breakpoint(); // not sure what to do
+            std.debug.print("Memory leak detected!\n", .{});
+        }
+    };
 
     while (true) {
         try stdout.print("\n################################################\n\nHello dear hodler, tell me what can I do for you\n1. Show me what you got\n2. Sign a transaction\n3. Connect to another node\n4. Exit\n\n", .{});
@@ -22,7 +37,7 @@ pub fn main() !void {
         switch (b) {
             '1' => try @import("report.zig").print(privkey),
             '2' => {
-                var tx = try promptTransaction();
+                var tx = try promptTransaction(allocator);
                 defer tx.deinit(allocator);
                 const input_index = 0;
                 var prompt_buf: [256]u8 = undefined;
@@ -47,7 +62,7 @@ pub fn main() !void {
     }
 }
 
-fn promptTransaction() !Bitcoin.Tx {
+fn promptTransaction(alloc: std.mem.Allocator) !Bitcoin.Tx {
     const stdout = std.io.getStdOut().writer();
     try stdout.print("NOTE: Only P2PKH is currently supported\n", .{});
     const testnet = try promptBool("Do you want to use testnet?");
@@ -64,7 +79,7 @@ fn promptTransaction() !Bitcoin.Tx {
 	.prev_output_index = prev_output_index,
 	.amount = amount,
 	.target_address = target_address,
-        .alloc = allocator,
+        .alloc = alloc,
     });
 }
 

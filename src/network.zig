@@ -491,14 +491,16 @@ pub const Node = struct {
 
         // Start handshake
         const timestamp = std.time.timestamp();
-        try Node.sendMessage(connection, .{
+        const out_message = Protocol.Message{
             .version = .{
                 .timestamp = timestamp,
                 .nonce = @intCast(timestamp),
                 .start_height = 0,
                 .user_agent = try alloc.dupe(u8, "Zignode"),
             },
-        });
+        };
+        try Node.sendMessage(connection, out_message);
+        out_message.deinit(alloc);
 
         // Read answer
         var received: [2]Protocol.Message = undefined;
@@ -576,6 +578,7 @@ pub const Node = struct {
 //#region TESTS #########################################################################
 
 const expect = std.testing.expect;
+const t_alloc = std.testing.allocator;
 
 test "protocol: message serialization" {
     const message = Protocol.Message{ .ping = .{ .nonce = 0x127f } };
@@ -588,7 +591,7 @@ test "protocol: message serialization" {
         res,
     );
 
-    const parsed_res = (try Protocol.Message.parse(res)).value;
+    const parsed_res = (try Protocol.Message.parse(res, t_alloc)).value;
     var buffer2 = [_]u8{0} ** 32;
     const serialized_parsed_res = try parsed_res.serialize(&buffer2);
 
@@ -605,7 +608,7 @@ test "protocol: handshake and version" {
     //const host = "77.173.132.140"; // from bitcoin core's nodes_main.txt
     const port = 8333;
     const address = try net.Address.resolveIp(host, port);
-    _ = Node.connect(address) catch |err| switch (err) {
+    _ = Node.connect(address, t_alloc) catch |err| switch (err) {
         error.ConnectionError,
         error.SendError,
         error.ReceiveError,

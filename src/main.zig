@@ -52,7 +52,23 @@ pub fn main() !void {
                 //const targetIpAddress = std.net.Address{ .in = .init([_]u8{58,96,123,120},8333) };//try promptIpAddress();
                 const targetIpAddress = try promptIpAddress();
                 const connection = try Network.Node.connect(targetIpAddress, allocator);
-                try stdout.print("\nConnection established successfully with \nIP: {any}\nUser Agent: {s}\n", .{ connection.peer_address, connection.user_agent });
+                try stdout.print("\nConnection established successfully with \nIP: {any}\nUser Agent: {s}\n\n", .{ connection.peer_address, connection.user_agent });
+
+                try stdout.print("What do you want to do?\n1. ask for genesis block headers\n\n", .{});
+                const action = try stdin.readUntilDelimiter(&buf, '\n');
+                switch (action[0]) {
+                    '1' => {
+                        try stdout.print("Requesting for block headers...\n", .{});
+                        try Network.Node.sendMessage(connection, Network.Protocol.Message{ .getheaders = .{
+                            .hash_start_block = Network.genesis_block_hash,
+                            .hash_final_block = 0x00000000839a8e6886ab5951d76f411475428afc90947ee320161bbf18eb6048,
+                        } });
+                        const msg = try Network.Node.readMessage(connection, allocator);
+                        defer msg.deinit(allocator);
+                        try stdout.print("Response:\n{any}\n", .{msg});
+                    },
+                    else => continue,
+                }
             },
             '4' => break,
             else => {
@@ -73,12 +89,12 @@ fn promptTransaction(alloc: std.mem.Allocator) !Bitcoin.Tx {
     const prev_output_index = try promptInt(u32, "Previous output index", .{});
     const amount = try promptInt(u64, "Amount to send", .{});
     const target_address = try promptString(&buf2, "Target address");
-    return try Bitcoin.Tx.initP2PKH( .{
+    return try Bitcoin.Tx.initP2PKH(.{
         .testnet = testnet,
-	.prev_txid = prev_txid,
-	.prev_output_index = prev_output_index,
-	.amount = amount,
-	.target_address = target_address,
+        .prev_txid = prev_txid,
+        .prev_output_index = prev_output_index,
+        .amount = amount,
+        .target_address = target_address,
         .alloc = alloc,
     });
 }
@@ -119,7 +135,7 @@ fn promptInt(comptime T: type, msg: []const u8, opts: PromptIntOpts) !T {
     const stdout = std.io.getStdOut().writer();
     const stdin = std.io.getStdIn().reader();
     if (opts.default_value) |default| {
-        try stdout.print("{s} [numeric, default={}]: ", .{msg, default});
+        try stdout.print("{s} [numeric, default={}]: ", .{ msg, default });
     } else {
         try stdout.print("{s} [numeric]: ", .{msg});
     }

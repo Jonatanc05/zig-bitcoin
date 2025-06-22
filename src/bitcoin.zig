@@ -15,19 +15,34 @@ const CryptLib = @import("cryptography.zig");
 const Cursor = @import("cursor.zig").Cursor;
 
 pub const Aux = struct {
+    /// writes little endian
     pub fn writeVarint(stream: std.io.AnyWriter, value: u32) !void {
-        if (value < 0xfd) {
-            try stream.writeInt(u8, @intCast(value), .little);
-        } else if (value <= 0xffff) {
-            try stream.writeByte(0xfd);
-            try stream.writeInt(u16, @intCast(value), .little);
-        } else if (value < 0xffffff) {
-            try stream.writeByte(0xfe);
-            try stream.writeInt(u24, @intCast(value), .little);
-        } else {
-            try stream.writeByte(0xff);
-            try stream.writeInt(u32, @intCast(value), .little);
+        switch (value) {
+            0...0xfc => {
+                try stream.writeInt(u8, @intCast(value), .little);
+            },
+            0xfd...0x0ffff => {
+                try stream.writeByte(0xfd);
+                try stream.writeInt(u16, @intCast(value), .little);
+            },
+            0x10000...0xffffff => {
+                try stream.writeByte(0xfe);
+                try stream.writeInt(u24, @intCast(value), .little);
+            },
+            else => {
+                try stream.writeByte(0xff);
+                try stream.writeInt(u32, @intCast(value), .little);
+            },
         }
+    }
+
+    pub fn sizeAsVarint(value: u32) usize {
+        return switch (value) {
+            0...0xfc => 1,
+            0xfd...0x0ffff => 3,
+            0x10000...0xffffff => 4,
+            else => 5,
+        };
     }
 };
 
@@ -335,7 +350,6 @@ pub const Tx = struct {
 
         writer.writeInt(u32, self.version, .little) catch return mem.Allocator.Error.OutOfMemory;
 
-
         if (self.witness != null) {
             writer.writeByte(0) catch return mem.Allocator.Error.OutOfMemory;
             writer.writeByte(1) catch return mem.Allocator.Error.OutOfMemory;
@@ -538,7 +552,7 @@ pub const Script = struct {
             self.data[self.top] = @intCast(value.len);
             self.top += 1;
         }
-        const PushError = error{StackFull}||mem.Allocator.Error;
+        const PushError = error{StackFull} || mem.Allocator.Error;
 
         fn pushInt(self: *Self, value: Self.Int) PushError!void {
             try self.push(mem.asBytes(&value));
@@ -659,7 +673,7 @@ pub const Script = struct {
         }
     };
 
-    const RunError = mem.Allocator.Error || error {
+    const RunError = mem.Allocator.Error || error{
         Internal,
         BadScript,
         StackFull,
@@ -671,8 +685,7 @@ pub const Script = struct {
             fn handlePopError(err: Stack.PopError) !void {
                 switch (err) {
                     error.OutBufferTooSmall => return error.Internal,
-                    error.Corrupted,
-                    error.EmptyStack => return error.BadScript,
+                    error.Corrupted, error.EmptyStack => return error.BadScript,
                 }
             }
         };
@@ -763,9 +776,9 @@ pub const Script = struct {
                 Op.OP_HASH160 => {
                     var buffer_value: [Stack.MAX_STACK_ELEMENT_SIZE]u8 = undefined;
                     const value = stack.pop(&buffer_value) catch |err| return switch (err) {
-                            Stack.PopError.OutBufferTooSmall => @panic("Not handling HASH160 for stack items larger than 520 bytes"),
-                            else => Local.handlePopError(err),
-                        };
+                        Stack.PopError.OutBufferTooSmall => @panic("Not handling HASH160 for stack items larger than 520 bytes"),
+                        else => Local.handlePopError(err),
+                    };
                     var hash160_data: [20]u8 = undefined;
                     hash160(value, &hash160_data);
                     try stack.push(&hash160_data);
@@ -785,17 +798,15 @@ pub const Script = struct {
                 },
                 else => {
                     var buffer: [100]u8 = undefined;
-                    const msg = std.fmt.bufPrint(&buffer, "Opcode {} not implemented\n", .{opcode})
-                        catch @panic("While running a Script, a not implemented Opcode was found");
+                    const msg = std.fmt.bufPrint(&buffer, "Opcode {} not implemented\n", .{opcode}) catch @panic("While running a Script, a not implemented Opcode was found");
                     @panic(msg);
                 },
             }
         }
     }
 
-    pub const Error = error{Internal}||mem.Allocator.Error;
-    pub fn validate(scriptSig: []const u8, scriptPubKey: []const u8, transaction: ?*Tx, input_index: ?usize, alloc: mem.Allocator)
-    Error!bool {
+    pub const Error = error{Internal} || mem.Allocator.Error;
+    pub fn validate(scriptSig: []const u8, scriptPubKey: []const u8, transaction: ?*Tx, input_index: ?usize, alloc: mem.Allocator) Error!bool {
         var stack = try Stack.init(scriptSig.len + scriptPubKey.len, alloc);
         defer stack.deinit(alloc);
         stack.setAlloc(alloc);
@@ -803,11 +814,9 @@ pub const Script = struct {
         const Local = struct {
             fn handleError(err: Script.RunError) !bool {
                 return switch (err) {
-                    error.Internal,
-                    error.StackFull => error.Internal,
+                    error.Internal, error.StackFull => error.Internal,
                     mem.Allocator.Error.OutOfMemory => error.OutOfMemory,
-                    error.BadScript,
-                    error.VerifyFailed => false,
+                    error.BadScript, error.VerifyFailed => false,
                 };
             }
         };
@@ -1046,7 +1055,7 @@ test "tx: transaction signing and checksig" {
     const prev_script_pubkey = [_]u8{ 0x76, 0xa9, 0x14, 0xaf, 0x72, 0x4f, 0xc6, 0x1f, 0x4d, 0x5c, 0x4d, 0xb0, 0x6b, 0x33, 0x95, 0xc9, 0xb4, 0x50, 0xa8, 0x0d, 0x25, 0xb6, 0x73, 0x88, 0xac };
     const target_address = "mnvfTUzPbeWBxwxinm37C1bsQ5ckZuN9E7";
 
-    var transaction = try Tx.initP2PKH( .{
+    var transaction = try Tx.initP2PKH(.{
         .testnet = true,
         .prev_txid = prev_txid,
         .prev_output_index = 1,

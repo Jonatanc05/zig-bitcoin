@@ -7,7 +7,7 @@ const Sha256 = std.crypto.hash.sha2.Sha256;
 const Cursor = @import("cursor.zig").Cursor;
 const Bitcoin = @import("bitcoin.zig");
 
-const genesis_block_hash: u256 = 0xdeadbeef;
+pub const genesis_block_hash: u256 = 0x000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f;
 
 fn ipv4_as_ipv6(ipv4: [4]u8) [16]u8 {
     return [1]u8{0} ** 10 ++ [2]u8{ 0xff, 0xff } ++ ipv4;
@@ -18,6 +18,7 @@ pub const Protocol = struct {
 
     const magic_mainnet = 0xf9beb4d9;
     const magic_testnet = 0x0b110907;
+    const header_len = 24;
 
     /// Union for any message accepted by the Bitcoin protocol and its corresponding payload as data
     pub const Message = union(enum) {
@@ -25,19 +26,6 @@ pub const Protocol = struct {
             nonce: u64,
 
             pub fn serialize(self: @This(), writer: std.io.AnyWriter) anyerror!void {
-                // length
-                try expect(@sizeOf(@TypeOf(self)) == 8);
-                try writer.writeInt(u32, 8, .little);
-
-                // checksum
-                var hash: [32]u8 = undefined;
-                var nonce_bytes: [8]u8 = undefined;
-                std.mem.writeInt(u64, &nonce_bytes, self.nonce, .little);
-                Sha256.hash(&nonce_bytes, &hash, .{});
-                Sha256.hash(&hash, &hash, .{});
-                try writer.writeAll(hash[0..4]);
-
-                // payload
                 try writer.writeInt(u64, self.nonce, .little);
             }
 
@@ -79,19 +67,6 @@ pub const Protocol = struct {
             nonce: u64,
 
             pub fn serialize(self: @This(), writer: std.io.AnyWriter) anyerror!void {
-                // length
-                try expect(@sizeOf(@TypeOf(self)) == 8);
-                try writer.writeInt(u32, 8, .little);
-
-                // checksum
-                var hash: [32]u8 = undefined;
-                var nonce_bytes: [8]u8 = undefined;
-                std.mem.writeInt(u64, &nonce_bytes, self.nonce, .little);
-                Sha256.hash(&nonce_bytes, &hash, .{});
-                Sha256.hash(&hash, &hash, .{});
-                try writer.writeAll(hash[0..4]);
-
-                // payload
                 try writer.writeInt(u64, self.nonce, .little);
             }
 
@@ -145,43 +120,25 @@ pub const Protocol = struct {
             relay: bool = false,
 
             pub fn serialize(self: @This(), writer: std.io.AnyWriter) anyerror!void {
-                var payload_buffer: [256]u8 = undefined;
-                {
-                    var bufstream = std.io.fixedBufferStream(&payload_buffer);
-                    const bufwriter = bufstream.writer();
-                    try bufwriter.writeInt(i32, self.version, .little);
-                    try bufwriter.writeInt(u64, self.services, .little);
-                    try bufwriter.writeInt(i64, self.timestamp, .little);
+                try writer.writeInt(i32, self.version, .little);
+                try writer.writeInt(u64, self.services, .little);
+                try writer.writeInt(i64, self.timestamp, .little);
 
-                    try bufwriter.writeInt(u64, self.receiver_services, .little);
-                    try bufwriter.writeAll(&self.receiver_ip);
-                    try bufwriter.writeInt(u16, self.receiver_port, .big);
+                try writer.writeInt(u64, self.receiver_services, .little);
+                try writer.writeAll(&self.receiver_ip);
+                try writer.writeInt(u16, self.receiver_port, .big);
 
-                    try bufwriter.writeInt(u64, self.sender_services, .little);
-                    try bufwriter.writeAll(&self.sender_ip);
-                    try bufwriter.writeInt(u16, self.sender_port, .big);
+                try writer.writeInt(u64, self.sender_services, .little);
+                try writer.writeAll(&self.sender_ip);
+                try writer.writeInt(u16, self.sender_port, .big);
 
-                    try bufwriter.writeInt(u64, self.nonce, .little);
-                    std.debug.assert(self.user_agent.len < 0xfd); // It's supposed to be read as varint
-                    try bufwriter.writeInt(u8, @intCast(self.user_agent.len), .little);
-                    try bufwriter.writeAll(self.user_agent);
-                    try bufwriter.writeInt(i32, self.start_height, .little);
+                try writer.writeInt(u64, self.nonce, .little);
+                std.debug.assert(self.user_agent.len < 0xfd); // It's supposed to be read as varint
+                try writer.writeInt(u8, @intCast(self.user_agent.len), .little);
+                try writer.writeAll(self.user_agent);
+                try writer.writeInt(i32, self.start_height, .little);
 
-                    try bufwriter.writeInt(u8, if (self.relay) 1 else 0, .big);
-                }
-
-                // length
-                const payload_size = 86 + self.user_agent.len;
-                try writer.writeInt(u32, @intCast(payload_size), .little);
-
-                // checksum
-                var hash: [32]u8 = undefined;
-                Sha256.hash(payload_buffer[0..payload_size], &hash, .{});
-                Sha256.hash(&hash, &hash, .{});
-                try writer.writeAll(hash[0..4]);
-
-                // payload
-                try writer.writeAll(payload_buffer[0..payload_size]);
+                try writer.writeInt(u8, if (self.relay) 1 else 0, .big);
             }
 
             pub fn parse(data: []const u8, alloc: std.mem.Allocator) anyerror!ParseResult {
@@ -259,8 +216,7 @@ pub const Protocol = struct {
         verack: struct {
             pub fn serialize(self: @This(), writer: std.io.AnyWriter) anyerror!void {
                 _ = self;
-                const serialized = [_]u8{ 0xf9, 0xbe, 0xb4, 0xd9, 0x76, 0x65, 0x72, 0x61, 0x63, 0x6b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x5d, 0xf6, 0xe0, 0xe2 };
-                try writer.writeAll(&serialized);
+                _ = writer;
             }
 
             pub fn parse(data: []const u8, unused: std.mem.Allocator) anyerror!ParseResult {
@@ -274,8 +230,9 @@ pub const Protocol = struct {
         getheaders: struct {
             version: i32 = 70014,
             hash_count: u32 = 1,
-            hash_start_block: u256 = genesis_block_hash,
-            hash_final_block: u256 = 0,
+            hash_start_block: u256,
+            /// 0 means "as much as possible"
+            hash_final_block: u256,
 
             pub fn serialize(self: @This(), writer: std.io.AnyWriter) anyerror!void {
                 try writer.writeInt(i32, self.version, .little);
@@ -288,7 +245,7 @@ pub const Protocol = struct {
                 _ = unused;
                 var cursor = Cursor.init(data);
                 var res = ParseResult{
-                    .value = .{ .getheaders = .{} },
+                    .value = .{ .getheaders = undefined },
                     .bytes_read_count = 0,
                 };
 
@@ -309,26 +266,35 @@ pub const Protocol = struct {
             }
         },
         headers: struct {
-            data: Bitcoin.Block,
+            // @TODO should hold many blocks
             count: u32,
+            data: Bitcoin.Block,
 
             pub fn serialize(self: @This(), writer: std.io.AnyWriter) anyerror!void {
+                // @TODO thats unecessary copying, can we improve?
+                std.debug.assert(self.count == 1);
+                try Bitcoin.Aux.writeVarint(writer, self.count);
                 var buffer: [80]u8 = undefined;
                 const serialization = try self.data.serialize(&buffer);
                 try writer.writeAll(serialization);
-                try Bitcoin.Aux.writeVarint(writer, self.count);
+                try writer.writeInt(u8, 0, .little);
             }
 
             pub fn parse(data: []const u8, unused: std.mem.Allocator) anyerror!ParseResult {
                 _ = unused;
-                const block_res = try Bitcoin.Block.parse(data);
-                assert(@sizeOf(Bitcoin.Block) == 80);
-                var cursor = Cursor.init(data[80..]);
+                std.debug.print("parsing the following as *headers*:\n\n{s}\n", .{std.fmt.fmtSliceHexLower(data)});
+                var cursor = Cursor.init(data);
                 const starting_index = cursor.index;
                 const count = cursor.readVarint();
+                std.debug.assert(count == 1); // TODO
+                var buffer: [80]u8 = undefined;
+                cursor.readBytes(&buffer);
+                std.debug.assert(cursor.readInt(u8, .little) == 0);
                 const total_read: u32 = 80 + @as(u32, @intCast(cursor.index - starting_index));
+
+                const block_res = try Bitcoin.Block.parse(&buffer);
                 return .{
-                    .value = .{ .headers = .{ .data = block_res, .count = count } },
+                    .value = .{ .headers = .{ .count = count, .data = block_res } },
                     .bytes_read_count = total_read,
                 };
             }
@@ -361,7 +327,7 @@ pub const Protocol = struct {
                     .is_mandatory = false,
                     .name = "deinit",
                     .return_type = void,
-                    .params = &[_]type{void, std.mem.Allocator},
+                    .params = &[_]type{ void, std.mem.Allocator },
                 },
             };
 
@@ -420,11 +386,26 @@ pub const Protocol = struct {
                 break :command_bytes command_bytes;
             });
 
-            // payload length, checksum and contents
+            // payload
+            std.debug.assert(writer.context.pos == 16);
+            // intentionally skipping 8 bytes cause we need payload to compute them
+            var payload_buffer = buffer[24..];
+            var payload_stream = std.io.fixedBufferStream(payload_buffer);
             switch (self.*) {
-                inline else => |field| try field.serialize(writer.any()),
+                inline else => |field| try field.serialize(payload_stream.writer().any()),
             }
-            return buffer[0..writer.context.pos];
+            const payload_size = payload_stream.pos;
+
+            // length
+            try writer.writeInt(u32, @intCast(payload_size), .little);
+
+            // checksum
+            var hash: [32]u8 = undefined;
+            Sha256.hash(payload_buffer[0..payload_size], &hash, .{});
+            Sha256.hash(&hash, &hash, .{});
+            try writer.writeAll(hash[0..4]);
+
+            return buffer[0 .. writer.context.pos + payload_size];
         }
 
         const ParseResult = struct { value: Message, bytes_read_count: u32 };
@@ -564,6 +545,7 @@ pub const Node = struct {
     pub fn sendMessage(connection: Node.Connection, message: Protocol.Message) !void {
         var buffer: [1024]u8 = undefined;
         const data = try message.serialize(&buffer);
+        std.debug.print("Sending {s}, see payload ({d} bytes):\n{s}\n", .{ @tagName(message), data.len - Protocol.header_len, std.fmt.fmtSliceHexLower(data[Protocol.header_len..]) });
         connection.stream.writeAll(data) catch |err| {
             std.debug.print("Failed to write to socket at {any}: {s}\n", .{ connection.peer_address, @errorName(err) });
             return error.SendError;
@@ -572,7 +554,7 @@ pub const Node = struct {
 
     /// Synchronously waits to receive bytes. Caller should call .deinit() on returned value
     pub fn readMessage(connection: Connection, alloc: std.mem.Allocator) !Protocol.Message {
-        const header_len = 24;
+        const header_len = Protocol.header_len;
         var buffer = ([1]u8{0} ** header_len) ++ ([1]u8{0} ** (1024 * 256));
         var header_slice = buffer[0..header_len];
 
@@ -581,13 +563,17 @@ pub const Node = struct {
             return error.ReceiveError;
         };
         if (read_count1 < header_len) return error.ReceiveError;
+        std.debug.assert(read_count1 == header_len);
         const payload_length = std.mem.readInt(u32, header_slice[16..][0..4], .little);
+        const payload_slice = buffer[header_len..][0..payload_length];
 
-        const read_count2 = connection.stream.readAtLeast(buffer[header_len..][0..payload_length], payload_length) catch |err| {
+        const read_count2 = connection.stream.readAtLeast(payload_slice, payload_length) catch |err| {
             std.debug.print("Failed to read from socket at {any}: {s}\n", .{ connection.peer_address, @errorName(err) });
             return error.ReceiveError;
         };
         if (read_count2 < payload_length) return error.ReceiveError;
+
+        std.debug.print("[DEBUG]: Received {s}, see payload ({d} bytes):\n{s}\n", .{ header_slice[4..16], payload_length, std.fmt.fmtSliceHexLower(payload_slice) });
 
         const result = Protocol.Message.parse(buffer[0..], alloc) catch return error.PayloadParseError;
         return result.value;

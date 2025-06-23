@@ -479,7 +479,7 @@ pub const Node = struct {
 
     pub fn connect(address: net.Address, alloc: std.mem.Allocator) !Connection {
         const stream = net.tcpConnectToAddress(address) catch |err| {
-            std.log.err("Failed to connect to {}: {s}\n", .{ address, @errorName(err) });
+            std.log.err("Failed to connect to {}: {s}", .{ address, @errorName(err) });
             return error.ConnectionError;
         };
         var connection = Connection{
@@ -544,10 +544,10 @@ pub const Node = struct {
     pub fn sendMessage(connection: Node.Connection, message: Protocol.Message) !void {
         var buffer: [1024]u8 = undefined;
         const data = try message.serialize(&buffer);
-        std.log.debug("Sending message \"{s}\" with following payload ({d} bytes):\n", .{ @tagName(message), data.len - Protocol.header_len });
-        std.log.debug("{s}\n", .{std.fmt.fmtSliceHexLower(data[Protocol.header_len..])});
+        std.log.debug("Sending message \"{s}\" with following payload ({d} bytes):", .{ @tagName(message), data.len - Protocol.header_len });
+        std.log.debug("{s}", .{std.fmt.fmtSliceHexLower(data[Protocol.header_len..])});
         connection.stream.writeAll(data) catch |err| {
-            std.log.err("Failed to write to socket at {any}: {s}\n", .{ connection.peer_address, @errorName(err) });
+            std.log.err("Failed to write to socket at {any}: {s}", .{ connection.peer_address, @errorName(err) });
             return error.SendError;
         };
     }
@@ -559,7 +559,7 @@ pub const Node = struct {
         var header_slice = buffer[0..header_len];
 
         const read_count1 = connection.stream.readAtLeast(header_slice, header_len) catch |err| {
-            std.log.err("Failed to read from socket at {any}: {s}\n", .{ connection.peer_address, @errorName(err) });
+            std.log.err("Failed to read from socket at {any}: {s}", .{ connection.peer_address, @errorName(err) });
             return error.ReceiveError;
         };
         if (read_count1 < header_len) return error.ReceiveError;
@@ -568,13 +568,13 @@ pub const Node = struct {
         const payload_slice = buffer[header_len..][0..payload_length];
 
         const read_count2 = connection.stream.readAtLeast(payload_slice, payload_length) catch |err| {
-            std.log.err("Failed to read from socket at {any}: {s}\n", .{ connection.peer_address, @errorName(err) });
+            std.log.err("Failed to read from socket at {any}: {s}", .{ connection.peer_address, @errorName(err) });
             return error.ReceiveError;
         };
         if (read_count2 < payload_length) return error.ReceiveError;
 
-        std.log.debug("Received message \"{s}\" with the following payload ({d} bytes):\n", .{ header_slice[4..16], payload_length });
-        std.log.debug("{s}\n", .{std.fmt.fmtSliceHexLower(payload_slice)});
+        std.log.debug("Received message \"{s}\" with the following payload ({d} bytes):", .{ header_slice[4..16], payload_length });
+        std.log.debug("{s}", .{std.fmt.fmtSliceHexLower(payload_slice)});
 
         const result = Protocol.Message.parse(buffer[0..], alloc) catch return error.PayloadParseError;
         return result.value;

@@ -62,7 +62,7 @@ pub fn main() !void {
                         try stdout.print("Requesting for block headers...\n", .{});
                         try Network.Node.sendMessage(connection, Network.Protocol.Message{ .getheaders = .{
                             .hash_start_block = Network.genesis_block_hash,
-                            .hash_final_block = 0x00000000839a8e6886ab5951d76f411475428afc90947ee320161bbf18eb6048,
+                            .hash_final_block = 0x00000000839a8e6886ab5951d76f411475428afc90947ee320161bbf18eb6048, // genesis successor
                         } });
                         const msg = try Network.Node.readMessage(connection, allocator);
                         defer msg.deinit(allocator);

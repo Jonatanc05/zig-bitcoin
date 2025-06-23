@@ -55,18 +55,46 @@ pub fn main() !void {
                 const connection = try Network.Node.connect(targetIpAddress, allocator);
                 try stdout.print("\nConnection established successfully with \nIP: {any}\nUser Agent: {s}\n\n", .{ connection.peer_address, connection.user_agent });
 
-                try stdout.print("What do you want to do?\n1. ask for genesis block headers\n\n", .{});
+                try stdout.print("What do you want to do?\n1. ask for a block header\n\n", .{});
                 const action = try stdin.readUntilDelimiter(&buf, '\n');
                 switch (action[0]) {
                     '1' => {
                         try stdout.print("Requesting for block headers...\n", .{});
-                        try Network.Node.sendMessage(connection, Network.Protocol.Message{ .getheaders = .{
-                            .hash_start_block = Network.genesis_block_hash,
-                            .hash_final_block = 0x00000000839a8e6886ab5951d76f411475428afc90947ee320161bbf18eb6048, // genesis successor
-                        } });
-                        const msg = try Network.Node.readMessage(connection, allocator);
-                        defer msg.deinit(allocator);
-                        try stdout.print("Response:\n{any}\n", .{msg});
+                        try Network.Node.sendMessage(connection, Network.Protocol.Message{
+                            .getheaders = .{
+                                .hash_count = 1,
+                                .hash_start_block = Network.genesis_block_hash,
+                                //.hash_final_block = 0x00000000839a8e6886ab5951d76f411475428afc90947ee320161bbf18eb6048, // genesis successor
+                                .hash_final_block = 0x000000006a625f06636b8bb6ac7b960a8d03705d1ace08b1a19da3fdcc99ddbd, // genesis successor's successor
+                                //.hash_final_block = 0,
+                            },
+                        });
+
+                        var message: Network.Protocol.Message = undefined;
+                        outer: while (true) {
+                            if (Network.Node.readMessage(connection, allocator)) |msg| {
+                                switch (msg) {
+                                    Network.Protocol.Message.ping => |ping| {
+                                        try Network.Node.sendMessage(
+                                            connection,
+                                            Network.Protocol.Message{ .pong = .{ .nonce = ping.nonce } },
+                                        );
+                                    },
+                                    Network.Protocol.Message.headers => {
+                                        message = msg;
+                                        break :outer;
+                                    },
+                                    // @TODO have experienced being answered with inv
+                                    else => {},
+                                }
+                                msg.deinit(allocator);
+                            } else |err| switch (err) {
+                                error.UnsupportedCommandReceived => continue,
+                                else => return err,
+                            }
+                        }
+                        try stdout.print("Response: {any}\n", .{message});
+                        message.deinit(allocator);
                     },
                     else => continue,
                 }

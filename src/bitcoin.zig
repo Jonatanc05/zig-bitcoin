@@ -853,6 +853,7 @@ pub const Block = struct {
         return bytes.toOwnedSlice();
     }
 
+    // @TODO looks like this doesn't need an error union anymore
     pub fn parse(data: []const u8) !Block {
         var cursor = Cursor.init(data);
         var block: Block = undefined;

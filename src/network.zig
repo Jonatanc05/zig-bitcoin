@@ -9,12 +9,21 @@ const Bitcoin = @import("bitcoin.zig");
 
 pub const genesis_block_hash: u256 = 0x000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f;
 
+const genesis_block = Bitcoin.Block{
+    .version = 0x00000001,
+    .prev_block = 0,
+    .merkle_root = 0x4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b,
+    .timestamp = 0x495fab29,
+    .bits = 0x1d00ffff,
+    .nonce = 0x1dac2b7c,
+};
+
 fn ipv4_as_ipv6(ipv4: [4]u8) [16]u8 {
     return [1]u8{0} ** 10 ++ [2]u8{ 0xff, 0xff } ++ ipv4;
 }
 
 pub const Protocol = struct {
-    pub const current_version = 70014;
+    pub const current_version = 60002;
 
     const magic_mainnet = 0xf9beb4d9;
     const magic_testnet = 0x0b110907;
@@ -38,27 +47,9 @@ pub const Protocol = struct {
                     .bytes_read_count = 0,
                 };
 
-                const length = reader.readInt(u32, .little);
-                res.bytes_read_count += 4;
-                assert(length == 8);
-
-                var chcksum: [4]u8 = undefined;
-                reader.readBytes(&chcksum);
-                res.bytes_read_count += 4;
-
                 const nonce = reader.readInt(u64, .little);
                 res.value.ping.nonce = nonce;
                 res.bytes_read_count += 8;
-
-                var hash: [32]u8 = undefined;
-                var nonce_bytes: [8]u8 = undefined;
-                std.mem.writeInt(u64, &nonce_bytes, nonce, .little);
-                Sha256.hash(&nonce_bytes, &hash, .{});
-                Sha256.hash(&hash, &hash, .{});
-                const expected_checksum: [4]u8 = hash[0..4].*;
-                if (!std.mem.eql(u8, &chcksum, &expected_checksum)) {
-                    return error.ChecksumMismatch;
-                }
 
                 return res;
             }
@@ -78,27 +69,9 @@ pub const Protocol = struct {
                     .bytes_read_count = 0,
                 };
 
-                const length = reader.readInt(u32, .little);
-                res.bytes_read_count += 4;
-                assert(length == 8);
-
-                var chcksum: [4]u8 = undefined;
-                reader.readBytes(&chcksum);
-                res.bytes_read_count += 4;
-
                 const nonce = reader.readInt(u64, .little);
                 res.value.pong.nonce = nonce;
                 res.bytes_read_count += 8;
-
-                var hash: [32]u8 = undefined;
-                var nonce_bytes: [8]u8 = undefined;
-                std.mem.writeInt(u64, &nonce_bytes, nonce, .little);
-                Sha256.hash(&nonce_bytes, &hash, .{});
-                Sha256.hash(&hash, &hash, .{});
-                const expected_checksum: [4]u8 = hash[0..4].*;
-                if (!std.mem.eql(u8, &chcksum, &expected_checksum)) {
-                    return error.ChecksumMismatch;
-                }
 
                 return res;
             }
@@ -148,14 +121,6 @@ pub const Protocol = struct {
                     .bytes_read_count = 0,
                 };
 
-                const length = reader.readInt(u32, .little);
-                res.bytes_read_count += 4;
-
-                var chcksum: [4]u8 = undefined;
-                reader.readBytes(&chcksum);
-                res.bytes_read_count += 4;
-
-                const payload_bytes = reader.data[reader.index..][0..length]; // for checksum
                 var out = &res.value.version;
 
                 out.version = reader.readInt(i32, .little);
@@ -197,15 +162,6 @@ pub const Protocol = struct {
                 out.relay = (reader.readInt(u8, .little)) > 0;
                 res.bytes_read_count += 1;
 
-                // checksum validation
-                var hash: [32]u8 = undefined;
-                Sha256.hash(payload_bytes, &hash, .{});
-                Sha256.hash(&hash, &hash, .{});
-                const expected_checksum: []u8 = hash[0..4];
-                if (!std.mem.eql(u8, &chcksum, expected_checksum)) {
-                    return error.ChecksumMismatch;
-                }
-
                 return res;
             }
 
@@ -219,17 +175,15 @@ pub const Protocol = struct {
                 _ = writer;
             }
 
-            pub fn parse(data: []const u8, unused: std.mem.Allocator) anyerror!ParseResult {
+            pub fn parse(unused: []const u8, _unused: std.mem.Allocator) anyerror!ParseResult {
                 _ = unused;
-                var reader = Cursor.init(data);
-                assert(reader.readInt(u32, .little) == 0);
-                assert(reader.readInt(u32, .big) == 0x5df6e0e2);
+                _ = _unused;
                 return .{ .value = .{ .verack = .{} }, .bytes_read_count = 8 };
             }
         },
         getheaders: struct {
-            version: i32 = 70014,
-            hash_count: u32 = 1,
+            version: i32 = current_version,
+            hash_count: u32,
             hash_start_block: u256,
             /// 0 means "as much as possible"
             hash_final_block: u256,
@@ -266,34 +220,31 @@ pub const Protocol = struct {
             }
         },
         headers: struct {
-            // @TODO should hold many blocks
-            count: u32,
-            data: Bitcoin.Block,
+            data: []Bitcoin.Block,
 
             pub fn serialize(self: @This(), writer: std.io.AnyWriter) anyerror!void {
-                // @TODO thats unecessary copying, can we improve?
-                std.debug.assert(self.count == 1);
-                try Bitcoin.Aux.writeVarint(writer, self.count);
-                var buffer: [80]u8 = undefined;
-                const serialization = try self.data.serialize(&buffer);
-                try writer.writeAll(serialization);
-                try writer.writeInt(u8, 0, .little);
+                try Bitcoin.Aux.writeVarint(writer, @intCast(self.data.len));
+                for (self.data) |block| {
+                    var buffer: [80]u8 = undefined;
+                    const serialization = try block.serialize(&buffer);
+                    try writer.writeAll(serialization);
+                    try writer.writeInt(u8, 0, .little);
+                }
             }
 
-            pub fn parse(data: []const u8, unused: std.mem.Allocator) anyerror!ParseResult {
-                _ = unused;
+            pub fn parse(data: []const u8, alloc: std.mem.Allocator) anyerror!ParseResult {
                 var cursor = Cursor.init(data);
-                const starting_index = cursor.index;
                 const count = cursor.readVarint();
-                std.debug.assert(count == 1); // TODO
-                var buffer: [80]u8 = undefined;
-                cursor.readBytes(&buffer);
-                std.debug.assert(cursor.readInt(u8, .little) == 0);
-                const total_read: u32 = 80 + @as(u32, @intCast(cursor.index - starting_index));
+                const blocks = try alloc.alloc(Bitcoin.Block, count);
+                for (blocks) |*block| {
+                    block.* = try Bitcoin.Block.parse(cursor.data[cursor.index..][0..80]);
+                    cursor.index += 80;
+                    std.debug.assert(cursor.readInt(u8, .little) == 0);
+                }
+                const total_read: u32 = @intCast(cursor.index);
 
-                const block_res = try Bitcoin.Block.parse(&buffer);
                 return .{
-                    .value = .{ .headers = .{ .count = count, .data = block_res } },
+                    .value = .{ .headers = .{ .data = blocks } },
                     .bytes_read_count = total_read,
                 };
             }
@@ -416,17 +367,32 @@ pub const Protocol = struct {
                 .value = undefined,
                 .bytes_read_count = 0,
             };
+            defer res.bytes_read_count = @intCast(reader.context.pos);
 
             const magic = try reader.readInt(u32, .big);
-            res.bytes_read_count += 4;
             if (magic != magic_mainnet and magic != magic_testnet) // might try to assert the magic read and the current context in the future
                 return error.MagicNumberExpected;
 
             var command: [12]u8 = [_]u8{0} ** 12;
             assert(try reader.readAll(&command) == 12);
-            res.bytes_read_count += 12;
 
-            assert(res.bytes_read_count == 16);
+            const payload_size = try reader.readInt(u32, .little);
+
+            var checksum_read: [4]u8 = undefined;
+            std.debug.assert(try reader.readAll(&checksum_read) == 4);
+
+            const payload_slice = bytes[reader.context.pos..][0..payload_size];
+            // checksum validation
+            {
+                var hash: [32]u8 = undefined;
+                Sha256.hash(payload_slice, &hash, .{});
+                Sha256.hash(&hash, &hash, .{});
+                const calculated_checksum: []u8 = hash[0..4];
+                if (!std.mem.eql(u8, &checksum_read, calculated_checksum)) {
+                    return error.ChecksumMismatch;
+                }
+            }
+
             const first_zero_index: usize = for (command, 0..) |c, i| {
                 if (c == 0) break i;
             } else 12;
@@ -435,13 +401,13 @@ pub const Protocol = struct {
             inline for (@typeInfo(Message).@"union".fields) |field| {
                 if (std.mem.eql(u8, field.name, tag_name)) {
                     supported_command = true;
-                    const msg_parse_result = try field.type.parse(bytes[res.bytes_read_count..], alloc);
+                    const msg_parse_result = try field.type.parse(payload_slice, alloc);
                     res.value = msg_parse_result.value;
                     res.bytes_read_count += msg_parse_result.bytes_read_count;
                 }
             }
 
-            if (!supported_command) return error.UnsupportedCommandReceived;
+            if (!supported_command) return error.UnsupportedCommandReceived; // TODO maybe shouldn't be an error condition?
 
             return res;
         }
@@ -562,7 +528,7 @@ pub const Node = struct {
             std.log.err("Failed to read from socket at {any}: {s}", .{ connection.peer_address, @errorName(err) });
             return error.ReceiveError;
         };
-        if (read_count1 < header_len) return error.ReceiveError;
+        if (read_count1 < header_len) return error.ReceiveError; // TODO this is reached when there are no messages. Change error name? Don't error?
         std.debug.assert(read_count1 == header_len);
         const payload_length = std.mem.readInt(u32, header_slice[16..][0..4], .little);
         const payload_slice = buffer[header_len..][0..payload_length];
@@ -576,7 +542,7 @@ pub const Node = struct {
         std.log.debug("Received message \"{s}\" with the following payload ({d} bytes):", .{ header_slice[4..16], payload_length });
         std.log.debug("{s}", .{std.fmt.fmtSliceHexLower(payload_slice)});
 
-        const result = Protocol.Message.parse(buffer[0..], alloc) catch return error.PayloadParseError;
+        const result = try Protocol.Message.parse(buffer[0..], alloc);
         return result.value;
     }
 };

@@ -1,5 +1,4 @@
 const std = @import("std");
-const stdprint = std.debug.print;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
 const EllipticCurveLib = @import("elliptic-curve.zig");
@@ -11,6 +10,7 @@ const allocator = std.heap.page_allocator;
 const CryptLib = @import("cryptography.zig");
 
 pub fn print(privkey: u256) !void {
+    const stdprint = std.io.getStdOut().writer().print;
     stdprint("\n------------- FiniteFields -------------\n", .{});
     {
         EllipticCurveLib.FieldElement(u256).setGlobalPrime(13);

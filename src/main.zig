@@ -17,8 +17,9 @@ pub fn main() !void {
         if (builtin.mode == .Debug) {
             var gpa = std.heap.DebugAllocator(.{}).init;
             break :blk .{ gpa.allocator(), gpa };
+        } else {
+            break :blk .{ std.heap.smp_allocator, null };
         }
-        break :blk .{ std.heap.smp_allocator, null };
     };
 
     defer if (debug != null) {

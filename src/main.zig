@@ -71,6 +71,7 @@ pub fn main() !void {
                         });
 
                         var message: Network.Protocol.Message = undefined;
+                        defer message.deinit(allocator);
                         outer: while (true) {
                             if (Network.Node.readMessage(connection, allocator)) |msg| {
                                 switch (msg) {
@@ -93,8 +94,24 @@ pub fn main() !void {
                                 else => return err,
                             }
                         }
-                        try stdout.print("Response: {any}\n", .{message});
-                        message.deinit(allocator);
+                        std.debug.assert(message == .headers);
+                        const blocks = message.headers.data;
+                        try stdout.print("Blocks received ({d}):\n", .{blocks.len});
+                        var prev_hash: [32]u8 = undefined;
+                        std.mem.writeInt(u256, &prev_hash, Network.genesis_block_hash, .big);
+                        for (blocks, 0..) |block, i| {
+                            var hash: [32]u8 = undefined;
+                            block.hash(&hash);
+                            try stdout.print("[{d}] {s}: PoW {s}, prev {s} ({s} vs {s})\n", .{
+                                i,
+                                std.fmt.fmtSliceHexLower(hash[0..10]),
+                                if (block.checkProofOfWork()) "OK" else "XX",
+                                if (std.mem.eql(u8, &block.prev_block, &prev_hash)) "OK" else "XX",
+                                std.fmt.fmtSliceHexLower(std.mem.asBytes(&block.prev_block)[0..10]),
+                                std.fmt.fmtSliceHexLower(std.mem.asBytes(&prev_hash)[0..10]),
+                            });
+                            prev_hash = hash;
+                        }
                     },
                     else => continue,
                 }

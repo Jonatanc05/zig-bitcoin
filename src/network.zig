@@ -226,7 +226,7 @@ pub const Protocol = struct {
                 try Bitcoin.Aux.writeVarint(writer, @intCast(self.data.len));
                 for (self.data) |block| {
                     var buffer: [80]u8 = undefined;
-                    const serialization = try block.serialize(&buffer);
+                    const serialization = block.serialize(&buffer);
                     try writer.writeAll(serialization);
                     try writer.writeInt(u8, 0, .little);
                 }
@@ -237,7 +237,7 @@ pub const Protocol = struct {
                 const count = cursor.readVarint();
                 const blocks = try alloc.alloc(Bitcoin.Block, count);
                 for (blocks) |*block| {
-                    block.* = try Bitcoin.Block.parse(cursor.data[cursor.index..][0..80]);
+                    block.* = Bitcoin.Block.parse(cursor.data[cursor.index..][0..80]);
                     cursor.index += 80;
                     std.debug.assert(cursor.readInt(u8, .little) == 0);
                 }
@@ -584,5 +584,7 @@ test "protocol: handshake and version" {
     try expect(connection.handshaked);
     try expect(connection.peer_version > 0);
 }
+
+// @TODO test for receiving blocks
 
 //#endregion

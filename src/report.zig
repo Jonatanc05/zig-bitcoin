@@ -1,3 +1,5 @@
+//! Prints a demo of the cryptographic capabilties. Used to be the development debuggin logs. Now unused
+
 const std = @import("std");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 

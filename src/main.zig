@@ -5,6 +5,12 @@ const GenericWriter = std.io.GenericWriter;
 const GenericReader = std.io.GenericReader;
 const builtin = @import("builtin");
 
+// TODO
+// - Request all block headers
+// - SPV
+
+const MAX_CONNECTIONS = 9;
+
 pub fn main() !void {
     const stdout = std.io.getStdOut().writer();
     const stdin = std.io.getStdIn().reader();
@@ -21,7 +27,6 @@ pub fn main() !void {
             break :blk .{ std.heap.smp_allocator, null };
         }
     };
-
     defer if (debug != null) {
         if (debug.?.deinit() == .leak) {
             @breakpoint(); // not sure what to do
@@ -29,44 +34,94 @@ pub fn main() !void {
         }
     };
 
+    const ConnectionSlot = struct {
+        alive: bool,
+        data: Network.Node.Connection,
+    };
+    const state: struct {
+        connections: []ConnectionSlot,
+    } = .{
+        .connections = try allocator.alloc(ConnectionSlot, MAX_CONNECTIONS),
+    };
+
     while (true) {
-        try stdout.print("\n################################################\n\nHello dear hodler, tell me what can I do for you\n1. Show me what you got\n2. Sign a transaction\n3. Connect to another node\n4. Exit\n\n", .{});
+        try stdout.print("\n################################################\n", .{});
+        try stdout.print("\nHello dear hodler, tell me what can I do for you\n", .{});
+        try stdout.print("1. List connections (interact with peers)\n", .{});
+        try stdout.print("2. Connect to a new peer\n", .{});
+        try stdout.print("3. Sign a transaction\n", .{});
+        try stdout.print("4. Exit\n\n", .{});
 
         var buf: [9]u8 = undefined;
         const input = try stdin.readUntilDelimiter(&buf, '\n');
         const b = input[0];
-        switch (b) {
-            '1' => try @import("report.zig").print(privkey),
-            '2' => {
-                var tx = try promptTransaction(allocator);
-                defer tx.deinit(allocator);
-                const input_index = 0;
-                var prompt_buf: [256]u8 = undefined;
-                const prev_pubkey = try promptBytesHex(&prompt_buf, "Previous pubkey");
-                try tx.sign(privkey, input_index, prev_pubkey, allocator);
-                const bytes = try tx.serialize(allocator);
-                defer allocator.free(bytes);
-                try stdout.print("\nTransaction:\n{}\n", .{std.fmt.fmtSliceHexLower(bytes)});
+        outerswitch: switch (b) {
+            '1' => {
+                const anyConnection = for (state.connections) |conn| {
+                    if (conn.alive) break true;
+                } else false;
+                if (!anyConnection) {
+                    try stdout.print("\n<empty>\n", .{});
+                } else {
+                    try stdout.print("\nPeer list:\n", .{});
+                    for (state.connections, 0..) |conn, i| {
+                        if (conn.alive)
+                            try stdout.print("{d}: {any} | {s}\n", .{ i + 1, conn.data.peer_address, conn.data.user_agent });
+                    }
+                    try stdout.print("\nType 'i' followed by a number to interact with a peer (ex.: 'i 2')\n", .{});
+                }
             },
-            '3' => {
+            '2' => {
+                const new_peer_id = for (state.connections, 0..) |conn, i| {
+                    if (!conn.alive) break i;
+                } else {
+                    try stdout.print("\nERROR: reached maximum number of peers\n", .{});
+                    break;
+                };
+
                 //const targetIpAddress = std.net.Address{ .in = .init([_]u8{74,220,255,190},8333) };//try promptIpAddress();
                 //const targetIpAddress = std.net.Address{ .in = .init([_]u8{58,96,123,120},8333) };//try promptIpAddress();
                 const targetIpAddress = try promptIpAddress();
-                const connection = try Network.Node.connect(targetIpAddress, allocator);
-                try stdout.print("\nConnection established successfully with \nIP: {any}\nUser Agent: {s}\n\n", .{ connection.peer_address, connection.user_agent });
 
-                try stdout.print("What do you want to do?\n1. ask for a block header\n\n", .{});
+                state.connections[new_peer_id].data = try Network.Node.connect(targetIpAddress, allocator);
+                state.connections[new_peer_id].alive = true;
+                try stdout.print("\nConnection established successfully with \nPeer ID: {d}\nIP: {any}\nUser Agent: {s}\n\n", .{
+                    new_peer_id + 1,
+                    state.connections[new_peer_id].data.peer_address,
+                    state.connections[new_peer_id].data.user_agent,
+                });
+            },
+            'i' => {
+                std.debug.assert(MAX_CONNECTIONS < 10); // Based on this premise we assume 3 character input: 'i', ' ' and 'X' as single-digit number
+                const trimmed = std.mem.trimRight(u8, input, &.{' ', '\r', '\n'});
+                if (trimmed.len != 3 or trimmed[1] != ' ' or trimmed[2] < '1' or trimmed[2] > '9') {
+                    try stdout.print("Not sure what you mean... try like 'i 1'\n", .{});
+                    std.log.debug("'{s}'\n", .{trimmed});
+                    break :outerswitch;
+                }
+
+                const peer_id = (try std.fmt.charToDigit(trimmed[2], 10)) - 1;
+                if (!state.connections[peer_id].alive)
+                    try stdout.print("That's not a valid peer id\n", .{});
+
+                const connection = state.connections[peer_id].data;
+                try stdout.print("\nWhat do you want to do?\n", .{});
+                try stdout.print("1. disconnect from peer\n", .{});
+                try stdout.print("2. ask for block headers\n", .{});
                 const action = try stdin.readUntilDelimiter(&buf, '\n');
                 switch (action[0]) {
                     '1' => {
+                        state.connections[peer_id].alive = false;
+                    },
+                    '2' => {
                         try stdout.print("Requesting for block headers...\n", .{});
                         try Network.Node.sendMessage(connection, Network.Protocol.Message{
                             .getheaders = .{
                                 .hash_count = 1,
                                 .hash_start_block = Network.genesis_block_hash,
                                 //.hash_final_block = 0x00000000839a8e6886ab5951d76f411475428afc90947ee320161bbf18eb6048, // genesis successor
-                                .hash_final_block = 0x000000006a625f06636b8bb6ac7b960a8d03705d1ace08b1a19da3fdcc99ddbd, // genesis successor's successor
-                                //.hash_final_block = 0,
+                                //.hash_final_block = 0x000000006a625f06636b8bb6ac7b960a8d03705d1ace08b1a19da3fdcc99ddbd, // genesis successor's successor
+                                .hash_final_block = 0,
                             },
                         });
 
@@ -85,8 +140,12 @@ pub fn main() !void {
                                         message = msg;
                                         break :outer;
                                     },
+
                                     // @TODO have experienced being answered with inv
-                                    else => {},
+
+                                    else => {
+                                        std.debug.print("Unexpected command: {s}\n", .{@tagName(msg)});
+                                    },
                                 }
                                 msg.deinit(allocator);
                             } else |err| switch (err) {
@@ -102,19 +161,28 @@ pub fn main() !void {
                         for (blocks, 0..) |block, i| {
                             var hash: [32]u8 = undefined;
                             block.hash(&hash);
-                            try stdout.print("[{d}] {s}: PoW {s}, prev {s} ({s} vs {s})\n", .{
+                            try stdout.print("[{d}] {s}: PoW {s}, prev {s}\n", .{
                                 i,
                                 std.fmt.fmtSliceHexLower(hash[0..10]),
                                 if (block.checkProofOfWork()) "OK" else "XX",
                                 if (std.mem.eql(u8, &block.prev_block, &prev_hash)) "OK" else "XX",
-                                std.fmt.fmtSliceHexLower(std.mem.asBytes(&block.prev_block)[0..10]),
-                                std.fmt.fmtSliceHexLower(std.mem.asBytes(&prev_hash)[0..10]),
                             });
                             prev_hash = hash;
                         }
                     },
                     else => continue,
                 }
+            },
+            '3' => {
+                var tx = try promptTransaction(allocator);
+                defer tx.deinit(allocator);
+                const input_index = 0;
+                var prompt_buf: [256]u8 = undefined;
+                const prev_pubkey = try promptBytesHex(&prompt_buf, "Previous pubkey");
+                try tx.sign(privkey, input_index, prev_pubkey, allocator);
+                const bytes = try tx.serialize(allocator);
+                defer allocator.free(bytes);
+                try stdout.print("\nTransaction:\n{}\n", .{std.fmt.fmtSliceHexLower(bytes)});
             },
             '4' => break,
             else => {

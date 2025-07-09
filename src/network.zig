@@ -585,6 +585,4 @@ test "protocol: handshake and version" {
     try expect(connection.peer_version > 0);
 }
 
-// @TODO test for receiving blocks
-
 //#endregion

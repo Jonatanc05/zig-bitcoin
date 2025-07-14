@@ -7,17 +7,6 @@ const Sha256 = std.crypto.hash.sha2.Sha256;
 const Cursor = @import("cursor.zig").Cursor;
 const Bitcoin = @import("bitcoin.zig");
 
-pub const genesis_block_hash: u256 = 0x000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f;
-
-const genesis_block = Bitcoin.Block{
-    .version = 0x00000001,
-    .prev_block = 0,
-    .merkle_root = 0x4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b,
-    .timestamp = 0x495fab29,
-    .bits = 0x1d00ffff,
-    .nonce = 0x1dac2b7c,
-};
-
 fn ipv4_as_ipv6(ipv4: [4]u8) [16]u8 {
     return [1]u8{0} ** 10 ++ [2]u8{ 0xff, 0xff } ++ ipv4;
 }
@@ -407,7 +396,8 @@ pub const Protocol = struct {
                 }
             }
 
-            if (!supported_command) return error.UnsupportedCommandReceived; // TODO maybe shouldn't be an error condition?
+            // @TODO shouldn't be an error condition but we want temporarily be sure we implented common commands
+            if (!supported_command) return error.UnsupportedCommandReceived;
 
             return res;
         }

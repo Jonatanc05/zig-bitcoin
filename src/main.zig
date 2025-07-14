@@ -1,15 +1,24 @@
 const std = @import("std");
 const Bitcoin = @import("bitcoin.zig");
 const Network = @import("network.zig");
+const Blockchain = @import("blockchain.zig");
 const GenericWriter = std.io.GenericWriter;
 const GenericReader = std.io.GenericReader;
 const builtin = @import("builtin");
 
 // TODO
-// - Request all block headers
 // - SPV
 
 const MAX_CONNECTIONS = 9;
+comptime {
+    // logic for `i 2` depends on that
+    std.debug.assert(MAX_CONNECTIONS < 10);
+}
+
+const State = struct {
+    connections: [MAX_CONNECTIONS]struct { alive: bool, data: Network.Node.Connection },
+    chain: Blockchain.State,
+};
 
 pub fn main() !void {
     const stdout = std.io.getStdOut().writer();
@@ -34,20 +43,16 @@ pub fn main() !void {
         }
     };
 
-    const ConnectionSlot = struct {
-        alive: bool,
-        data: Network.Node.Connection,
-    };
-    const state: struct {
-        connections: []ConnectionSlot,
-    } = .{
-        .connections = try allocator.alloc(ConnectionSlot, MAX_CONNECTIONS),
-    };
+    var state: *State = try allocator.create(State);
+    defer allocator.destroy(state);
+
+    state.chain = try Blockchain.State.init(allocator);
+    defer state.chain.deinit(allocator);
 
     while (true) {
         try stdout.print("\n################################################\n", .{});
         try stdout.print("\nHello dear hodler, tell me what can I do for you\n", .{});
-        try stdout.print("1. List connections (interact with peers)\n", .{});
+        try stdout.print("1. List peers (interact)\n", .{});
         try stdout.print("2. Connect to a new peer\n", .{});
         try stdout.print("3. Sign a transaction\n", .{});
         try stdout.print("4. Exit\n\n", .{});
@@ -93,7 +98,7 @@ pub fn main() !void {
             },
             'i' => {
                 std.debug.assert(MAX_CONNECTIONS < 10); // Based on this premise we assume 3 character input: 'i', ' ' and 'X' as single-digit number
-                const trimmed = std.mem.trimRight(u8, input, &.{' ', '\r', '\n'});
+                const trimmed = std.mem.trimRight(u8, input, &.{ ' ', '\r', '\n' });
                 if (trimmed.len != 3 or trimmed[1] != ' ' or trimmed[2] < '1' or trimmed[2] > '9') {
                     try stdout.print("Not sure what you mean... try like 'i 1'\n", .{});
                     std.log.debug("'{s}'\n", .{trimmed});
@@ -118,7 +123,7 @@ pub fn main() !void {
                         try Network.Node.sendMessage(connection, Network.Protocol.Message{
                             .getheaders = .{
                                 .hash_count = 1,
-                                .hash_start_block = Network.genesis_block_hash,
+                                .hash_start_block = state.chain.latest_block_header,
                                 //.hash_final_block = 0x00000000839a8e6886ab5951d76f411475428afc90947ee320161bbf18eb6048, // genesis successor
                                 //.hash_final_block = 0x000000006a625f06636b8bb6ac7b960a8d03705d1ace08b1a19da3fdcc99ddbd, // genesis successor's successor
                                 .hash_final_block = 0,
@@ -127,7 +132,7 @@ pub fn main() !void {
 
                         var message: Network.Protocol.Message = undefined;
                         defer message.deinit(allocator);
-                        outer: while (true) {
+                        responses: while (true) {
                             if (Network.Node.readMessage(connection, allocator)) |msg| {
                                 switch (msg) {
                                     Network.Protocol.Message.ping => |ping| {
@@ -138,7 +143,7 @@ pub fn main() !void {
                                     },
                                     Network.Protocol.Message.headers => {
                                         message = msg;
-                                        break :outer;
+                                        break :responses;
                                     },
 
                                     // @TODO have experienced being answered with inv
@@ -156,19 +161,7 @@ pub fn main() !void {
                         std.debug.assert(message == .headers);
                         const blocks = message.headers.data;
                         try stdout.print("Blocks received ({d}):\n", .{blocks.len});
-                        var prev_hash: [32]u8 = undefined;
-                        std.mem.writeInt(u256, &prev_hash, Network.genesis_block_hash, .big);
-                        for (blocks, 0..) |block, i| {
-                            var hash: [32]u8 = undefined;
-                            block.hash(&hash);
-                            try stdout.print("[{d}] {s}: PoW {s}, prev {s}\n", .{
-                                i,
-                                std.fmt.fmtSliceHexLower(hash[0..10]),
-                                if (block.checkProofOfWork()) "OK" else "XX",
-                                if (std.mem.eql(u8, &block.prev_block, &prev_hash)) "OK" else "XX",
-                            });
-                            prev_hash = hash;
-                        }
+                        try state.chain.append(blocks);
                     },
                     else => continue,
                 }

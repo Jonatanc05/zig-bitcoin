@@ -7,16 +7,21 @@ const GenericReader = std.io.GenericReader;
 const builtin = @import("builtin");
 
 // TODO
+// - Store blockchain state on disk
+// - Address discovery?
+// - Continous requests
 // - SPV
 
-const MAX_CONNECTIONS = 9;
+const app_name = "ZiglyNode";
+const blockheaders_filename = "blockheaders.dat";
+const max_connections = 9;
 comptime {
     // logic for `i 2` depends on that
-    std.debug.assert(MAX_CONNECTIONS < 10);
+    std.debug.assert(max_connections < 10);
 }
 
 const State = struct {
-    connections: [MAX_CONNECTIONS]struct { alive: bool, data: Network.Node.Connection },
+    connections: [max_connections]struct { alive: bool, data: Network.Node.Connection },
     chain: Blockchain.State,
 };
 
@@ -48,6 +53,13 @@ pub fn main() !void {
 
     state.chain = try Blockchain.State.init(allocator);
     defer state.chain.deinit(allocator);
+
+    const blockheaders_file_result = try getOrCreateDataFile(allocator);
+    const blockheaders_file = blockheaders_file_result.file;
+    _ = blockheaders_file; // autofix
+    const created_now = blockheaders_file_result.created_now;
+    if (created_now)
+        try stdout.print("Creating file {s}\n", .{blockheaders_filename});
 
     while (true) {
         try stdout.print("\n################################################\n", .{});
@@ -84,11 +96,9 @@ pub fn main() !void {
                     break;
                 };
 
-                //const targetIpAddress = std.net.Address{ .in = .init([_]u8{74,220,255,190},8333) };//try promptIpAddress();
-                //const targetIpAddress = std.net.Address{ .in = .init([_]u8{58,96,123,120},8333) };//try promptIpAddress();
-                const targetIpAddress = try promptIpAddress();
+                const target_ip_address = try promptIpAddress();
 
-                state.connections[new_peer_id].data = try Network.Node.connect(targetIpAddress, allocator);
+                state.connections[new_peer_id].data = try Network.Node.connect(target_ip_address, app_name, allocator);
                 state.connections[new_peer_id].alive = true;
                 try stdout.print("\nConnection established successfully with \nPeer ID: {d}\nIP: {any}\nUser Agent: {s}\n\n", .{
                     new_peer_id + 1,
@@ -97,7 +107,7 @@ pub fn main() !void {
                 });
             },
             'i' => {
-                std.debug.assert(MAX_CONNECTIONS < 10); // Based on this premise we assume 3 character input: 'i', ' ' and 'X' as single-digit number
+                std.debug.assert(max_connections < 10); // Based on this premise we assume 3 character input: 'i', ' ' and 'X' as single-digit number
                 const trimmed = std.mem.trimRight(u8, input, &.{ ' ', '\r', '\n' });
                 if (trimmed.len != 3 or trimmed[1] != ' ' or trimmed[2] < '1' or trimmed[2] > '9') {
                     try stdout.print("Not sure what you mean... try like 'i 1'\n", .{});
@@ -183,6 +193,30 @@ pub fn main() !void {
             },
         }
     }
+}
+
+fn getOrCreateDataFile(allocator: std.mem.Allocator) !struct { file: std.fs.File, created_now: bool } {
+    const data_file_name = blockheaders_filename;
+    const data_file_path_max_size = std.fs.max_name_bytes - data_file_name.len;
+    var data_file_path_buffer: [data_file_path_max_size]u8 = undefined;
+    const appdata_dir = try std.fs.getAppDataDir(allocator, app_name);
+    defer allocator.free(appdata_dir);
+    std.debug.assert(appdata_dir.len < data_file_path_max_size);
+
+    for (appdata_dir, data_file_path_buffer[0..appdata_dir.len]) |ch, *out| out.* = ch;
+    data_file_path_buffer[appdata_dir.len] = std.fs.path.sep;
+    for (data_file_name, data_file_path_buffer[appdata_dir.len + 1 ..][0..data_file_name.len]) |ch, *out| out.* = ch;
+
+    const data_file_path = data_file_path_buffer[0 .. appdata_dir.len + data_file_name.len + 1];
+    const data_file = std.fs.openFileAbsolute(data_file_path, .{}) catch |err| switch (err) {
+        error.FileNotFound => {
+            try std.fs.makeDirAbsolute(appdata_dir);
+            const new_data_file = try std.fs.createFileAbsolute(data_file_path, .{});
+            return .{ .file = new_data_file, .created_now = true };
+        },
+        else => return err,
+    };
+    return .{ .file = data_file, .created_now = false };
 }
 
 fn promptTransaction(alloc: std.mem.Allocator) !Bitcoin.Tx {

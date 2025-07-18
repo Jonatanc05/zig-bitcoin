@@ -1,6 +1,6 @@
-## Zig Bitcoin
+## ZiglyNode - Zig Lyght Node
 
-#### A Bitcoin client with minimal dependencies written in Zig
+#### A Bitcoin light client with minimal dependencies written in Zig
 
 - I like [handmade software](https://handmade.network/)
 - I like [Bitcoin](https://btcmaxis.com/)

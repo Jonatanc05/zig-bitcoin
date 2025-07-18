@@ -433,7 +433,7 @@ pub const Node = struct {
         user_agent: [30]u8,
     };
 
-    pub fn connect(address: net.Address, alloc: std.mem.Allocator) !Connection {
+    pub fn connect(address: net.Address, self_user_agent: []const u8, alloc: std.mem.Allocator) !Connection {
         const stream = net.tcpConnectToAddress(address) catch |err| {
             std.log.err("Failed to connect to {}: {s}", .{ address, @errorName(err) });
             return error.ConnectionError;
@@ -453,7 +453,7 @@ pub const Node = struct {
                 .timestamp = timestamp,
                 .nonce = @intCast(timestamp),
                 .start_height = 0,
-                .user_agent = "Zignode",
+                .user_agent = self_user_agent,
             },
         });
 
@@ -570,7 +570,7 @@ test "protocol: handshake and version" {
     //const host = "77.173.132.140"; // from bitcoin core's nodes_main.txt
     const port = 8333;
     const address = try net.Address.resolveIp(host, port);
-    const connection = try Node.connect(address, t_alloc);
+    const connection = try Node.connect(address, "ZignodeTest", t_alloc);
     try expect(connection.handshaked);
     try expect(connection.peer_version > 0);
 }

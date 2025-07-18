@@ -7,9 +7,9 @@ const GenericReader = std.io.GenericReader;
 const builtin = @import("builtin");
 
 // TODO
-// - Store blockchain state on disk
 // - Address discovery?
 // - Continous requests
+// - Check difficulty
 // - SPV
 
 const app_name = "ZiglyNode";
@@ -21,18 +21,13 @@ comptime {
 }
 
 const State = struct {
+    privkey: u256,
+    address: []u8,
     connections: [max_connections]struct { alive: bool, data: Network.Node.Connection },
     chain: Blockchain.State,
 };
 
 pub fn main() !void {
-    const stdout = std.io.getStdOut().writer();
-    const stdin = std.io.getStdIn().reader();
-    const privkey: u256 = try std.fmt.parseInt(u256, @embedFile(".privkey")[0..64], 16);
-    var addr_buf: [40]u8 = undefined;
-    const address = Bitcoin.Address.fromPrivkey(privkey, true, &addr_buf);
-    try stdout.print("\nYour address is {s}\n", .{address});
-
     const allocator, var debug: ?std.heap.DebugAllocator(.{}) = blk: {
         if (builtin.mode == .Debug) {
             var gpa = std.heap.DebugAllocator(.{}).init;
@@ -51,23 +46,75 @@ pub fn main() !void {
     var state: *State = try allocator.create(State);
     defer allocator.destroy(state);
 
+    state.privkey = try std.fmt.parseInt(u256, @embedFile(".privkey")[0..64], 16);
+    state.address = addr: {
+        var addr_buf: [40]u8 = undefined;
+        const address = Bitcoin.Address.fromPrivkey(state.privkey, true, &addr_buf);
+        break :addr try allocator.dupe(u8, address);
+    };
+    defer allocator.free(state.address);
+
     state.chain = try Blockchain.State.init(allocator);
     defer state.chain.deinit(allocator);
 
-    const blockheaders_file_result = try getOrCreateDataFile(allocator);
-    const blockheaders_file = blockheaders_file_result.file;
-    _ = blockheaders_file; // autofix
-    const created_now = blockheaders_file_result.created_now;
-    if (created_now)
-        try stdout.print("Creating file {s}\n", .{blockheaders_filename});
+    blockheaders_from_disk: {
+        const appdata_dir = try std.fs.getAppDataDir(allocator, app_name);
+        defer allocator.free(appdata_dir);
+        std.fs.makeDirAbsolute(appdata_dir) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
 
+        const blockheaders_file_path = try std.fmt.allocPrint(allocator, "{s}{c}{s}", .{ appdata_dir, std.fs.path.sep, blockheaders_filename });
+        defer allocator.free(blockheaders_file_path);
+
+        const blockheaders_file = std.fs.openFileAbsolute(blockheaders_file_path, .{}) catch |err| switch (err) {
+            error.FileNotFound => {
+                std.log.debug("could not find existing {s}", .{blockheaders_file_path});
+                break :blockheaders_from_disk;
+            },
+            else => break :blockheaders_from_disk,
+        };
+        defer blockheaders_file.close();
+        std.log.debug("loading block headers from {s}", .{ blockheaders_file_path });
+
+        const blockheaders_file_size = (try blockheaders_file.stat()).size;
+        const bockheaders_file_valid = blockheaders_file_size != 0 and blockheaders_file_size % @sizeOf(Bitcoin.Block) == 0;
+
+        if (!bockheaders_file_valid) {
+            std.log.debug("The file {s} is corrupt... fix or delete it before proceeding", .{blockheaders_file_path});
+            break :blockheaders_from_disk;
+        }
+
+        const blockheaders_count = blockheaders_file_size / @sizeOf(Bitcoin.Block);
+        for (state.chain.block_headers[1..][0..blockheaders_count], 0..) |*block, i| {
+            var block_buffer: [@sizeOf(Bitcoin.Block)]u8 = undefined;
+            _ = blockheaders_file.read(&block_buffer) catch |err| {
+                std.log.debug("failed to read block {d} in {s}: {s}", .{ i, blockheaders_file_path, @errorName(err) });
+                break :blockheaders_from_disk;
+            };
+            for (std.mem.asBytes(block), std.mem.asBytes(&block_buffer)) |*out, read|
+                out.* = read;
+        }
+        state.chain.block_headers_count = @intCast(blockheaders_count + 1);
+        state.chain.latest_block_header = blk: {
+            var buf: [32]u8 = undefined;
+            state.chain.block_headers[state.chain.block_headers_count - 1].hash(&buf);
+            break :blk std.mem.readInt(u256, &buf, .big);
+        };
+    }
+
+    const stdout = std.io.getStdOut().writer();
+    const stdin = std.io.getStdIn().reader();
+    try stdout.print("\nYour address is {s}\n", .{state.address});
     while (true) {
         try stdout.print("\n################################################\n", .{});
         try stdout.print("\nHello dear hodler, tell me what can I do for you\n", .{});
         try stdout.print("1. List peers (interact)\n", .{});
         try stdout.print("2. Connect to a new peer\n", .{});
-        try stdout.print("3. Sign a transaction\n", .{});
-        try stdout.print("4. Exit\n\n", .{});
+        try stdout.print("3. View blockchain state\n", .{});
+        try stdout.print("4. Sign a transaction\n", .{});
+        try stdout.print("5. Exit\n\n", .{});
 
         var buf: [9]u8 = undefined;
         const input = try stdin.readUntilDelimiter(&buf, '\n');
@@ -80,11 +127,12 @@ pub fn main() !void {
                 if (!anyConnection) {
                     try stdout.print("\n<empty>\n", .{});
                 } else {
-                    try stdout.print("\nPeer list:\n", .{});
+                    try stdout.print("======== Peer list ========\n", .{});
                     for (state.connections, 0..) |conn, i| {
                         if (conn.alive)
                             try stdout.print("{d}: {any} | {s}\n", .{ i + 1, conn.data.peer_address, conn.data.user_agent });
                     }
+                    try stdout.print("===========================\n", .{});
                     try stdout.print("\nType 'i' followed by a number to interact with a peer (ex.: 'i 2')\n", .{});
                 }
             },
@@ -111,7 +159,6 @@ pub fn main() !void {
                 const trimmed = std.mem.trimRight(u8, input, &.{ ' ', '\r', '\n' });
                 if (trimmed.len != 3 or trimmed[1] != ' ' or trimmed[2] < '1' or trimmed[2] > '9') {
                     try stdout.print("Not sure what you mean... try like 'i 1'\n", .{});
-                    std.log.debug("'{s}'\n", .{trimmed});
                     break :outerswitch;
                 }
 
@@ -177,46 +224,61 @@ pub fn main() !void {
                 }
             },
             '3' => {
+                try stdout.print("\n=== Blockchain State ===\n", .{});
+                try stdout.print("Block headers count: {d}\n", .{state.chain.block_headers_count});
+
+                if (state.chain.block_headers_count > 1)
+                    try stdout.print("Latest block hash: {x:0>64}\n", .{ state.chain.latest_block_header });
+                try stdout.print("========================\n", .{});
+            },
+            '4' => {
                 var tx = try promptTransaction(allocator);
                 defer tx.deinit(allocator);
                 const input_index = 0;
                 var prompt_buf: [256]u8 = undefined;
                 const prev_pubkey = try promptBytesHex(&prompt_buf, "Previous pubkey");
-                try tx.sign(privkey, input_index, prev_pubkey, allocator);
+                try tx.sign(state.privkey, input_index, prev_pubkey, allocator);
                 const bytes = try tx.serialize(allocator);
                 defer allocator.free(bytes);
                 try stdout.print("\nTransaction:\n{}\n", .{std.fmt.fmtSliceHexLower(bytes)});
             },
-            '4' => break,
+            '5' => break,
             else => {
                 try stdout.print("\ninvalid byte read: {x}\n", .{b});
             },
         }
     }
-}
 
-fn getOrCreateDataFile(allocator: std.mem.Allocator) !struct { file: std.fs.File, created_now: bool } {
-    const data_file_name = blockheaders_filename;
-    const data_file_path_max_size = std.fs.max_name_bytes - data_file_name.len;
-    var data_file_path_buffer: [data_file_path_max_size]u8 = undefined;
-    const appdata_dir = try std.fs.getAppDataDir(allocator, app_name);
-    defer allocator.free(appdata_dir);
-    std.debug.assert(appdata_dir.len < data_file_path_max_size);
+    std.log.debug("saving data on disk...", .{});
 
-    for (appdata_dir, data_file_path_buffer[0..appdata_dir.len]) |ch, *out| out.* = ch;
-    data_file_path_buffer[appdata_dir.len] = std.fs.path.sep;
-    for (data_file_name, data_file_path_buffer[appdata_dir.len + 1 ..][0..data_file_name.len]) |ch, *out| out.* = ch;
+    save_blockheaders_to_disk: {
+        const appdata_dir = try std.fs.getAppDataDir(allocator, app_name);
+        defer allocator.free(appdata_dir);
+        std.fs.makeDirAbsolute(appdata_dir) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
 
-    const data_file_path = data_file_path_buffer[0 .. appdata_dir.len + data_file_name.len + 1];
-    const data_file = std.fs.openFileAbsolute(data_file_path, .{}) catch |err| switch (err) {
-        error.FileNotFound => {
-            try std.fs.makeDirAbsolute(appdata_dir);
-            const new_data_file = try std.fs.createFileAbsolute(data_file_path, .{});
-            return .{ .file = new_data_file, .created_now = true };
-        },
-        else => return err,
-    };
-    return .{ .file = data_file, .created_now = false };
+        const blockheaders_file_path = try std.fmt.allocPrint(allocator, "{s}{c}{s}", .{ appdata_dir, std.fs.path.sep, blockheaders_filename });
+        defer allocator.free(blockheaders_file_path);
+
+        const blockheaders_file = std.fs.createFileAbsolute(blockheaders_file_path, .{}) catch |err| {
+            std.log.debug("could not create {s}: {s}", .{ blockheaders_filename, @errorName(err) });
+            break :save_blockheaders_to_disk;
+        };
+        defer blockheaders_file.close();
+
+        // Save blocks excluding genesis block (starting from index 1)
+        if (state.chain.block_headers_count > 1) {
+            for (state.chain.block_headers[1..state.chain.block_headers_count]) |block| {
+                const block_bytes = std.mem.asBytes(&block);
+                _ = blockheaders_file.write(block_bytes) catch |err| {
+                    std.log.debug("failed to write block to {s}: {s}", .{ blockheaders_file_path, @errorName(err) });
+                    break :save_blockheaders_to_disk;
+                };
+            }
+        }
+    }
 }
 
 fn promptTransaction(alloc: std.mem.Allocator) !Bitcoin.Tx {

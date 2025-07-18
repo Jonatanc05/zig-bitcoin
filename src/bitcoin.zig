@@ -866,6 +866,7 @@ pub const Block = struct {
         return block;
     }
 
+    /// Resulting bytes on `buffer` should be read as big-endian
     pub fn hash(self: *const Block, buffer: []u8) void {
         std.debug.assert(buffer.len >= 32);
         var block_buffer: [80]u8 = undefined;

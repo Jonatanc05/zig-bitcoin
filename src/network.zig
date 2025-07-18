@@ -570,7 +570,7 @@ test "protocol: handshake and version" {
     //const host = "77.173.132.140"; // from bitcoin core's nodes_main.txt
     const port = 8333;
     const address = try net.Address.resolveIp(host, port);
-    const connection = try Node.connect(address, "ZignodeTest", t_alloc);
+    const connection = try Node.connect(address, "networkzig-test", t_alloc);
     try expect(connection.handshaked);
     try expect(connection.peer_version > 0);
 }

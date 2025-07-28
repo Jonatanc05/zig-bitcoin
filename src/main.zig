@@ -70,19 +70,19 @@ pub fn main() !void {
 
         const blockheaders_file = std.fs.openFileAbsolute(blockheaders_file_path, .{}) catch |err| switch (err) {
             error.FileNotFound => {
-                std.log.debug("could not find existing {s}", .{blockheaders_file_path});
+                std.log.err("could not find existing {s}", .{blockheaders_file_path});
                 break :blockheaders_from_disk;
             },
             else => break :blockheaders_from_disk,
         };
         defer blockheaders_file.close();
-        std.log.debug("loading block headers from {s}", .{ blockheaders_file_path });
+        std.log.info("loading block headers from {s}", .{ blockheaders_file_path });
 
         const blockheaders_file_size = (try blockheaders_file.stat()).size;
         const bockheaders_file_valid = blockheaders_file_size != 0 and blockheaders_file_size % @sizeOf(Bitcoin.Block) == 0;
 
         if (!bockheaders_file_valid) {
-            std.log.debug("The file {s} is corrupt... fix or delete it before proceeding", .{blockheaders_file_path});
+            std.log.err("The file {s} is corrupt... fix or delete it before proceeding", .{blockheaders_file_path});
             break :blockheaders_from_disk;
         }
 
@@ -90,7 +90,7 @@ pub fn main() !void {
         for (state.chain.block_headers[1..][0..blockheaders_count], 0..) |*block, i| {
             var block_buffer: [@sizeOf(Bitcoin.Block)]u8 = undefined;
             _ = blockheaders_file.read(&block_buffer) catch |err| {
-                std.log.debug("failed to read block {d} in {s}: {s}", .{ i, blockheaders_file_path, @errorName(err) });
+                std.log.err("failed to read block {d} in {s}: {s}", .{ i, blockheaders_file_path, @errorName(err) });
                 break :blockheaders_from_disk;
             };
             for (std.mem.asBytes(block), std.mem.asBytes(&block_buffer)) |*out, read|
@@ -170,6 +170,7 @@ pub fn main() !void {
                 try stdout.print("\nWhat do you want to do?\n", .{});
                 try stdout.print("1. disconnect from peer\n", .{});
                 try stdout.print("2. ask for block headers\n", .{});
+                try stdout.print("3. ask for new peers and connect \n", .{});
                 const action = try stdin.readUntilDelimiter(&buf, '\n');
                 switch (action[0]) {
                     '1' => {
@@ -177,7 +178,7 @@ pub fn main() !void {
                     },
                     '2' => {
                         try stdout.print("Requesting for block headers...\n", .{});
-                        try Network.Node.sendMessage(connection, Network.Protocol.Message{
+                        try Network.Node.sendMessage(&connection, Network.Protocol.Message{
                             .getheaders = .{
                                 .hash_count = 1,
                                 .hash_start_block = state.chain.latest_block_header,
@@ -187,38 +188,21 @@ pub fn main() !void {
                             },
                         });
 
-                        var message: Network.Protocol.Message = undefined;
+                        const message = try Network.Node.readUntilMessage(&connection, Network.Protocol.Message.headers, allocator);
+                        // var message: Network.Protocol.Message = undefined;
                         defer message.deinit(allocator);
-                        responses: while (true) {
-                            if (Network.Node.readMessage(connection, allocator)) |msg| {
-                                switch (msg) {
-                                    Network.Protocol.Message.ping => |ping| {
-                                        try Network.Node.sendMessage(
-                                            connection,
-                                            Network.Protocol.Message{ .pong = .{ .nonce = ping.nonce } },
-                                        );
-                                    },
-                                    Network.Protocol.Message.headers => {
-                                        message = msg;
-                                        break :responses;
-                                    },
-
-                                    // @TODO have experienced being answered with inv
-
-                                    else => {
-                                        std.debug.print("Unexpected command: {s}\n", .{@tagName(msg)});
-                                    },
-                                }
-                                msg.deinit(allocator);
-                            } else |err| switch (err) {
-                                error.UnsupportedCommandReceived => continue,
-                                else => return err,
-                            }
-                        }
                         std.debug.assert(message == .headers);
                         const blocks = message.headers.data;
                         try stdout.print("Blocks received ({d}):\n", .{blocks.len});
                         try state.chain.append(blocks);
+                    },
+                    '3' => {
+                        try stdout.print("Requesting for new peers...\n", .{});
+                        try Network.Node.sendMessage(&connection, Network.Protocol.Message{ .getaddr = .{} });
+                        const message = try Network.Node.readUntilMessage(&connection, Network.Protocol.Message.addr, allocator);
+                        defer message.deinit(allocator);
+                        std.debug.assert(message == .addr);
+                        try stdout.print("Success: {any}\n", .{message.addr});
                     },
                     else => continue,
                 }
@@ -249,7 +233,7 @@ pub fn main() !void {
         }
     }
 
-    std.log.debug("saving data on disk...", .{});
+    std.log.info("saving data on disk...", .{});
 
     save_blockheaders_to_disk: {
         const appdata_dir = try std.fs.getAppDataDir(allocator, app_name);
@@ -263,7 +247,7 @@ pub fn main() !void {
         defer allocator.free(blockheaders_file_path);
 
         const blockheaders_file = std.fs.createFileAbsolute(blockheaders_file_path, .{}) catch |err| {
-            std.log.debug("could not create {s}: {s}", .{ blockheaders_filename, @errorName(err) });
+            std.log.err("could not create {s}: {s}", .{ blockheaders_filename, @errorName(err) });
             break :save_blockheaders_to_disk;
         };
         defer blockheaders_file.close();
@@ -273,7 +257,7 @@ pub fn main() !void {
             for (state.chain.block_headers[1..state.chain.block_headers_count]) |block| {
                 const block_bytes = std.mem.asBytes(&block);
                 _ = blockheaders_file.write(block_bytes) catch |err| {
-                    std.log.debug("failed to write block to {s}: {s}", .{ blockheaders_file_path, @errorName(err) });
+                    std.log.err("failed to write block to {s}: {s}", .{ blockheaders_file_path, @errorName(err) });
                     break :save_blockheaders_to_disk;
                 };
             }

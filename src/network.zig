@@ -10,6 +10,10 @@ const Bitcoin = @import("bitcoin.zig");
 fn ipv4_as_ipv6(ipv4: [4]u8) [16]u8 {
     return [1]u8{0} ** 10 ++ [2]u8{ 0xff, 0xff } ++ ipv4;
 }
+fn u32ipv4_as_ipv6(ipv4: u32) [16]u8 {
+    const ipv4_bytes: [4]u8 = std.mem.asBytes(&ipv4).*;
+    return ipv4_as_ipv6(ipv4_bytes);
+}
 
 pub const Protocol = struct {
     pub const current_version = 60002;
@@ -18,8 +22,121 @@ pub const Protocol = struct {
     const magic_testnet = 0x0b110907;
     const header_len = 24;
 
+    const Addr = struct {
+        time: u32,
+        services: u64,
+        ip: [16]u8,
+        port: u16
+    };
+
     /// Union for any message accepted by the Bitcoin protocol and its corresponding payload as data
     pub const Message = union(enum) {
+        addr: struct {
+            count: u32,
+            addr_list: []Addr,
+
+            pub fn serialize(self: @This(), writer: std.io.AnyWriter) anyerror!void {
+                try Bitcoin.Aux.writeVarint(writer, self.count);
+                for (self.addr_list) |addr| {
+                    try writer.writeInt(u32, addr.time, .little);
+                    try writer.writeInt(u64, addr.services, .little);
+                    try writer.writeAll(&addr.ip);
+                    try writer.writeInt(u16, addr.port, .big);
+                }
+            }
+
+            pub fn parse(data: []const u8, alloc: std.mem.Allocator) anyerror!ParseResult {
+                var cursor = Cursor.init(data);
+                var res = ParseResult{
+                    .value = .{ .addr = undefined },
+                    .bytes_read_count = 0,
+                };
+
+                res.value.addr.count = cursor.readVarint();
+                res.value.addr.addr_list = try alloc.alloc(Protocol.Addr, @intCast(res.value.addr.count));
+                for (res.value.addr.addr_list) |*addr| {
+                    addr.time = cursor.readInt(u32, .little);
+                    addr.services = cursor.readInt(u64, .little);
+                    cursor.readBytes(&addr.ip);
+                    addr.port = cursor.readInt(u16, .big);
+                }
+
+                return res;
+            }
+
+            pub fn deinit(self: @This(), alloc: std.mem.Allocator) void {
+                alloc.free(self.addr_list);
+            }
+        },
+        getaddr: NoPayloadMessage("getaddr"),
+        getheaders: struct {
+            version: i32 = current_version,
+            hash_count: u32,
+            hash_start_block: u256,
+            /// 0 means "as much as possible"
+            hash_final_block: u256,
+
+            pub fn serialize(self: @This(), writer: std.io.AnyWriter) anyerror!void {
+                try writer.writeInt(i32, self.version, .little);
+                try Bitcoin.Aux.writeVarint(writer, self.hash_count);
+                try writer.writeInt(u256, self.hash_start_block, .little);
+                try writer.writeInt(u256, self.hash_final_block, .little);
+            }
+
+            pub fn parse(data: []const u8, unused: std.mem.Allocator) anyerror!ParseResult {
+                _ = unused;
+                var cursor = Cursor.init(data);
+                var res = ParseResult{
+                    .value = .{ .getheaders = undefined },
+                    .bytes_read_count = 0,
+                };
+
+                res.value.getheaders.version = cursor.readInt(i32, .little);
+                res.bytes_read_count += 4;
+
+                const starting_index = cursor.index;
+                res.value.getheaders.hash_count = cursor.readVarint();
+                res.bytes_read_count += @intCast(cursor.index - starting_index);
+
+                res.value.getheaders.hash_start_block = cursor.readInt(u256, .little);
+                res.bytes_read_count += 32;
+
+                res.value.getheaders.hash_final_block = cursor.readInt(u256, .little);
+                res.bytes_read_count += 32;
+
+                return res;
+            }
+        },
+        headers: struct {
+            data: []Bitcoin.Block,
+
+            pub fn serialize(self: @This(), writer: std.io.AnyWriter) anyerror!void {
+                try Bitcoin.Aux.writeVarint(writer, @intCast(self.data.len));
+                for (self.data) |block| {
+                    var buffer: [80]u8 = undefined;
+                    const serialization = block.serialize(&buffer);
+                    try writer.writeAll(serialization);
+                    try writer.writeInt(u8, 0, .little);
+                }
+            }
+
+            pub fn parse(data: []const u8, alloc: std.mem.Allocator) anyerror!ParseResult {
+                var cursor = Cursor.init(data);
+                const count = cursor.readVarint();
+                const blocks = try alloc.alloc(Bitcoin.Block, count);
+                for (blocks) |*block| {
+                    block.* = Bitcoin.Block.parse(cursor.data[cursor.index..][0..80]);
+                    cursor.index += 80;
+                    std.debug.assert(cursor.readInt(u8, .little) == 0);
+                }
+                const total_read: u32 = @intCast(cursor.index);
+
+                return .{
+                    .value = .{ .headers = .{ .data = blocks } },
+                    .bytes_read_count = total_read,
+                };
+            }
+        },
         ping: struct {
             nonce: u64,
 
@@ -65,6 +182,7 @@ pub const Protocol = struct {
                 return res;
             }
         },
+        verack: NoPayloadMessage("verack"),
         version: struct {
             version: i32 = current_version,
             // @TODO make it BIP159 compliant (https://github.com/bitcoin/bips/blob/master/bip-0159.mediawiki)
@@ -158,86 +276,6 @@ pub const Protocol = struct {
                 alloc.free(self.user_agent);
             }
         },
-        verack: struct {
-            pub fn serialize(self: @This(), writer: std.io.AnyWriter) anyerror!void {
-                _ = self;
-                _ = writer;
-            }
-
-            pub fn parse(unused: []const u8, _unused: std.mem.Allocator) anyerror!ParseResult {
-                _ = unused;
-                _ = _unused;
-                return .{ .value = .{ .verack = .{} }, .bytes_read_count = 8 };
-            }
-        },
-        getheaders: struct {
-            version: i32 = current_version,
-            hash_count: u32,
-            hash_start_block: u256,
-            /// 0 means "as much as possible"
-            hash_final_block: u256,
-
-            pub fn serialize(self: @This(), writer: std.io.AnyWriter) anyerror!void {
-                try writer.writeInt(i32, self.version, .little);
-                try Bitcoin.Aux.writeVarint(writer, self.hash_count);
-                try writer.writeInt(u256, self.hash_start_block, .little);
-                try writer.writeInt(u256, self.hash_final_block, .little);
-            }
-
-            pub fn parse(data: []const u8, unused: std.mem.Allocator) anyerror!ParseResult {
-                _ = unused;
-                var cursor = Cursor.init(data);
-                var res = ParseResult{
-                    .value = .{ .getheaders = undefined },
-                    .bytes_read_count = 0,
-                };
-
-                res.value.getheaders.version = cursor.readInt(i32, .little);
-                res.bytes_read_count += 4;
-
-                const starting_index = cursor.index;
-                res.value.getheaders.hash_count = cursor.readVarint();
-                res.bytes_read_count += @intCast(cursor.index - starting_index);
-
-                res.value.getheaders.hash_start_block = cursor.readInt(u256, .little);
-                res.bytes_read_count += 32;
-
-                res.value.getheaders.hash_final_block = cursor.readInt(u256, .little);
-                res.bytes_read_count += 32;
-
-                return res;
-            }
-        },
-        headers: struct {
-            data: []Bitcoin.Block,
-
-            pub fn serialize(self: @This(), writer: std.io.AnyWriter) anyerror!void {
-                try Bitcoin.Aux.writeVarint(writer, @intCast(self.data.len));
-                for (self.data) |block| {
-                    var buffer: [80]u8 = undefined;
-                    const serialization = block.serialize(&buffer);
-                    try writer.writeAll(serialization);
-                    try writer.writeInt(u8, 0, .little);
-                }
-            }
-
-            pub fn parse(data: []const u8, alloc: std.mem.Allocator) anyerror!ParseResult {
-                var cursor = Cursor.init(data);
-                const count = cursor.readVarint();
-                const blocks = try alloc.alloc(Bitcoin.Block, count);
-                for (blocks) |*block| {
-                    block.* = Bitcoin.Block.parse(cursor.data[cursor.index..][0..80]);
-                    cursor.index += 80;
-                    std.debug.assert(cursor.readInt(u8, .little) == 0);
-                }
-                const total_read: u32 = @intCast(cursor.index);
-
-                return .{
-                    .value = .{ .headers = .{ .data = blocks } },
-                    .bytes_read_count = total_read,
-                };
-            }
-        },
 
         // Enforce function signatures on each union tag (each protocol command)
         comptime {
@@ -309,6 +347,21 @@ pub const Protocol = struct {
             }
         }
 
+        pub fn NoPayloadMessage(comptime tag_name: []const u8) type {
+            return struct {
+                pub fn serialize(self: @This(), writer: std.io.AnyWriter) anyerror!void {
+                    _ = self;
+                    _ = writer;
+                }
+
+                pub fn parse(unused: []const u8, _unused: std.mem.Allocator) anyerror!ParseResult {
+                    _ = unused;
+                    _ = _unused;
+                    return .{ .value = @unionInit(Message, tag_name, .{}), .bytes_read_count = 8 };
+                }
+            };
+        }
+
         /// Includes the protocol headers (https://en.bitcoin.it/wiki/Protocol_documentation#Message_structure)
         pub fn serialize(self: *const Message, buffer: []u8) ![]u8 {
             var stream = std.io.fixedBufferStream(buffer);
@@ -368,7 +421,7 @@ pub const Protocol = struct {
             const payload_size = try reader.readInt(u32, .little);
 
             var checksum_read: [4]u8 = undefined;
-            std.debug.assert(try reader.readAll(&checksum_read) == 4);
+            assert(try reader.readAll(&checksum_read) == 4);
 
             const payload_slice = bytes[reader.context.pos..][0..payload_size];
             // checksum validation
@@ -396,7 +449,7 @@ pub const Protocol = struct {
                 }
             }
 
-            // @TODO shouldn't be an error condition but we want temporarily be sure we implented common commands
+            // shouldn't be an error condition but we want temporarily be sure we implented common commands
             if (!supported_command) return error.UnsupportedCommandReceived;
 
             return res;
@@ -448,7 +501,7 @@ pub const Node = struct {
 
         // Start handshake
         const timestamp = std.time.timestamp();
-        try Node.sendMessage(connection, .{
+        try Node.sendMessage(&connection, .{
             .version = .{
                 .timestamp = timestamp,
                 .nonce = @intCast(timestamp),
@@ -460,10 +513,10 @@ pub const Node = struct {
         // Read answer
         var received: [2]Protocol.Message = undefined;
 
-        received[0] = try Node.readMessage(connection, alloc);
+        received[0] = try Node.readMessage(&connection, alloc);
         defer received[0].deinit(alloc);
 
-        received[1] = try Node.readMessage(connection, alloc);
+        received[1] = try Node.readMessage(&connection, alloc);
         defer received[1].deinit(alloc);
 
         // Information to obtain
@@ -487,7 +540,7 @@ pub const Node = struct {
         }
 
         if (version_received != null and verack_received) {
-            try Node.sendMessage(connection, Protocol.Message{ .verack = .{} });
+            try Node.sendMessage(&connection, Protocol.Message{ .verack = .{} });
             connection.peer_version = version_received.?;
             connection.handshaked = true;
             connection.user_agent = user_agent_received;
@@ -497,7 +550,7 @@ pub const Node = struct {
         return error.HandshakeFailed;
     }
 
-    pub fn sendMessage(connection: Node.Connection, message: Protocol.Message) !void {
+    pub fn sendMessage(connection: *const Node.Connection, message: Protocol.Message) !void {
         var buffer: [1024]u8 = undefined;
         const data = try message.serialize(&buffer);
         std.log.debug("Sending message \"{s}\" with following payload ({d} bytes):", .{ @tagName(message), data.len - Protocol.header_len });
@@ -509,7 +562,7 @@ pub const Node = struct {
     }
 
     /// Synchronously waits to receive bytes. Caller should call .deinit() on returned value
-    pub fn readMessage(connection: Connection, alloc: std.mem.Allocator) !Protocol.Message {
+    pub fn readMessage(connection: *const Connection, alloc: std.mem.Allocator) !Protocol.Message {
         const header_len = Protocol.header_len;
         var buffer = ([1]u8{0} ** header_len) ++ ([1]u8{0} ** (1024 * 256));
         var header_slice = buffer[0..header_len];
@@ -518,7 +571,7 @@ pub const Node = struct {
             std.log.err("Failed to read from socket at {any}: {s}", .{ connection.peer_address, @errorName(err) });
             return error.ReceiveError;
         };
-        if (read_count1 < header_len) return error.ReceiveError; // TODO this is reached when there are no messages. Change error name? Don't error?
+        if (read_count1 < header_len) return error.NoMessages;
         std.debug.assert(read_count1 == header_len);
         const payload_length = std.mem.readInt(u32, header_slice[16..][0..4], .little);
         const payload_slice = buffer[header_len..][0..payload_length];
@@ -534,6 +587,35 @@ pub const Node = struct {
 
         const result = try Protocol.Message.parse(buffer[0..], alloc);
         return result.value;
+    }
+
+    /// Should be only temporary, we might (probably should) have evented messages
+    pub fn readUntilMessage(connection: *const Connection, comptime tag: @typeInfo(Protocol.Message).@"union".tag_type.?, alloc: std.mem.Allocator) !Protocol.Message {
+        while (true) {
+            if (readMessage(connection, alloc)) |msg| {
+                switch (msg) {
+                    Protocol.Message.ping => |ping| {
+                        try Node.sendMessage(
+                            connection,
+                            Protocol.Message{ .pong = .{ .nonce = ping.nonce } },
+                        );
+                    },
+                    tag => return msg,
+
+                    // @TODO have experienced being answered with inv
+
+                    else => {
+                        std.debug.print("Unexpected command: {s}\n", .{@tagName(msg)});
+                    },
+                }
+                msg.deinit(alloc);
+            } else |err| switch (err) {
+                error.UnsupportedCommandReceived => {
+                    std.debug.print("Unexpected and unsupported command received\n", .{});
+                },
+                else => return err,
+            }
+        }
     }
 };
 

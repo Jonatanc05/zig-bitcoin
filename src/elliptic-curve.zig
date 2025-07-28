@@ -213,7 +213,7 @@ pub fn CurvePoint(comptime NumberType: type) type {
         }
 
         pub fn serialize(self: *const @This(), comptime compressed: bool, out: *[if (compressed) 33 else 65]u8) void {
-            assert(self.x != null and self.y != null); // @TODO infinity
+            assert(self.x != null and self.y != null);
             var x_bytes: [32]u8 = undefined;
             std.mem.writeInt(u256, &x_bytes, self.x.?.value, .big);
 

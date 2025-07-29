@@ -22,22 +22,22 @@ pub const Protocol = struct {
     const magic_testnet = 0x0b110907;
     const header_len = 24;
 
-    const Addr = struct {
+    pub const Addr = struct {
         time: u32,
         services: u64,
         ip: [16]u8,
-        port: u16
+        port: u16,
     };
 
     /// Union for any message accepted by the Bitcoin protocol and its corresponding payload as data
     pub const Message = union(enum) {
         addr: struct {
             count: u32,
-            addr_list: []Addr,
+            addr_array: []Addr,
 
             pub fn serialize(self: @This(), writer: std.io.AnyWriter) anyerror!void {
                 try Bitcoin.Aux.writeVarint(writer, self.count);
-                for (self.addr_list) |addr| {
+                for (self.addr_array) |addr| {
                     try writer.writeInt(u32, addr.time, .little);
                     try writer.writeInt(u64, addr.services, .little);
                     try writer.writeAll(&addr.ip);
@@ -53,8 +53,8 @@ pub const Protocol = struct {
                 };
 
                 res.value.addr.count = cursor.readVarint();
-                res.value.addr.addr_list = try alloc.alloc(Protocol.Addr, @intCast(res.value.addr.count));
-                for (res.value.addr.addr_list) |*addr| {
+                res.value.addr.addr_array = try alloc.alloc(Protocol.Addr, @intCast(res.value.addr.count));
+                for (res.value.addr.addr_array) |*addr| {
                     addr.time = cursor.readInt(u32, .little);
                     addr.services = cursor.readInt(u64, .little);
                     cursor.readBytes(&addr.ip);
@@ -65,7 +65,7 @@ pub const Protocol = struct {
             }
 
             pub fn deinit(self: @This(), alloc: std.mem.Allocator) void {
-                alloc.free(self.addr_list);
+                alloc.free(self.addr_array);
             }
         },
         getaddr: NoPayloadMessage("getaddr"),
@@ -529,7 +529,7 @@ pub const Node = struct {
                     if (v_msg.version < Protocol.current_version)
                         return error.VersionMismatch;
                     for (v_msg.user_agent, 0..) |ch, i| {
-                        if (i > user_agent_received.len) break;
+                        if (i >= user_agent_received.len) break;
                         user_agent_received[i] = ch;
                     }
                     version_received = v_msg.version;
@@ -554,7 +554,12 @@ pub const Node = struct {
         var buffer: [1024]u8 = undefined;
         const data = try message.serialize(&buffer);
         std.log.debug("Sending message \"{s}\" with following payload ({d} bytes):", .{ @tagName(message), data.len - Protocol.header_len });
-        std.log.debug("{s}", .{std.fmt.fmtSliceHexLower(data[Protocol.header_len..])});
+        const debug_clip_index = 1000;
+        if (data.len > (debug_clip_index + Protocol.header_len)) {
+            std.log.debug("{s}... (+{} bytes)", .{ std.fmt.fmtSliceHexLower(data[Protocol.header_len..][0..debug_clip_index]), data.len - debug_clip_index - Protocol.header_len });
+        } else {
+            std.log.debug("{s}", .{std.fmt.fmtSliceHexLower(data[Protocol.header_len..])});
+        }
         connection.stream.writeAll(data) catch |err| {
             std.log.err("Failed to write to socket at {any}: {s}", .{ connection.peer_address, @errorName(err) });
             return error.SendError;
@@ -583,7 +588,12 @@ pub const Node = struct {
         if (read_count2 < payload_length) return error.ReceiveError;
 
         std.log.debug("Received message \"{s}\" with the following payload ({d} bytes):", .{ header_slice[4..16], payload_length });
-        std.log.debug("{s}", .{std.fmt.fmtSliceHexLower(payload_slice)});
+        const debug_clip_index = 1000;
+        if (payload_slice.len > debug_clip_index) {
+            std.log.debug("{s}... (+{} bytes)", .{ std.fmt.fmtSliceHexLower(payload_slice[0..debug_clip_index]), payload_slice.len - debug_clip_index });
+        } else {
+            std.log.debug("{s}", .{std.fmt.fmtSliceHexLower(payload_slice)});
+        }
 
         const result = try Protocol.Message.parse(buffer[0..], alloc);
         return result.value;

@@ -1,4 +1,5 @@
 const std = @import("std");
+const Address = std.net.Address;
 const Bitcoin = @import("bitcoin.zig");
 const Network = @import("network.zig");
 const Blockchain = @import("blockchain.zig");
@@ -7,14 +8,14 @@ const GenericReader = std.io.GenericReader;
 const builtin = @import("builtin");
 
 // TODO
-// - Address discovery?
 // - Continous requests
 // - Check difficulty
 // - SPV
+// - Keep connections alive?
 
 const app_name = "ZiglyNode";
 const blockheaders_filename = "blockheaders.dat";
-const max_connections = 9;
+const max_connections = 3;
 comptime {
     // logic for `i 2` depends on that
     std.debug.assert(max_connections < 10);
@@ -24,6 +25,7 @@ const State = struct {
     privkey: u256,
     address: []u8,
     connections: [max_connections]struct { alive: bool, data: Network.Node.Connection },
+    active_connections: u32,
     chain: Blockchain.State,
 };
 
@@ -46,6 +48,7 @@ pub fn main() !void {
     var state: *State = try allocator.create(State);
     defer allocator.destroy(state);
 
+    state.active_connections = 0;
     state.privkey = try std.fmt.parseInt(u256, @embedFile(".privkey")[0..64], 16);
     state.address = addr: {
         var addr_buf: [40]u8 = undefined;
@@ -57,7 +60,7 @@ pub fn main() !void {
     state.chain = try Blockchain.State.init(allocator);
     defer state.chain.deinit(allocator);
 
-    blockheaders_from_disk: {
+    read_blockheaders_from_disk: {
         const appdata_dir = try std.fs.getAppDataDir(allocator, app_name);
         defer allocator.free(appdata_dir);
         std.fs.makeDirAbsolute(appdata_dir) catch |err| switch (err) {
@@ -71,19 +74,19 @@ pub fn main() !void {
         const blockheaders_file = std.fs.openFileAbsolute(blockheaders_file_path, .{}) catch |err| switch (err) {
             error.FileNotFound => {
                 std.log.err("could not find existing {s}", .{blockheaders_file_path});
-                break :blockheaders_from_disk;
+                break :read_blockheaders_from_disk;
             },
-            else => break :blockheaders_from_disk,
+            else => break :read_blockheaders_from_disk,
         };
         defer blockheaders_file.close();
-        std.log.info("loading block headers from {s}", .{ blockheaders_file_path });
+        std.log.info("loading block headers from {s}", .{blockheaders_file_path});
 
         const blockheaders_file_size = (try blockheaders_file.stat()).size;
         const bockheaders_file_valid = blockheaders_file_size != 0 and blockheaders_file_size % @sizeOf(Bitcoin.Block) == 0;
 
         if (!bockheaders_file_valid) {
             std.log.err("The file {s} is corrupt... fix or delete it before proceeding", .{blockheaders_file_path});
-            break :blockheaders_from_disk;
+            break :read_blockheaders_from_disk;
         }
 
         const blockheaders_count = blockheaders_file_size / @sizeOf(Bitcoin.Block);
@@ -91,7 +94,7 @@ pub fn main() !void {
             var block_buffer: [@sizeOf(Bitcoin.Block)]u8 = undefined;
             _ = blockheaders_file.read(&block_buffer) catch |err| {
                 std.log.err("failed to read block {d} in {s}: {s}", .{ i, blockheaders_file_path, @errorName(err) });
-                break :blockheaders_from_disk;
+                break :read_blockheaders_from_disk;
             };
             for (std.mem.asBytes(block), std.mem.asBytes(&block_buffer)) |*out, read|
                 out.* = read;
@@ -144,10 +147,11 @@ pub fn main() !void {
                     break;
                 };
 
-                const target_ip_address = try promptIpAddress();
+                const target_ip_address = try Prompt.promptIpAddress(.{ .default_value = "127.0.0.1" });
 
                 state.connections[new_peer_id].data = try Network.Node.connect(target_ip_address, app_name, allocator);
                 state.connections[new_peer_id].alive = true;
+                state.active_connections += 1;
                 try stdout.print("\nConnection established successfully with \nPeer ID: {d}\nIP: {any}\nUser Agent: {s}\n\n", .{
                     new_peer_id + 1,
                     state.connections[new_peer_id].data.peer_address,
@@ -175,34 +179,17 @@ pub fn main() !void {
                 switch (action[0]) {
                     '1' => {
                         state.connections[peer_id].alive = false;
+                        state.active_connections -= 1;
                     },
                     '2' => {
-                        try stdout.print("Requesting for block headers...\n", .{});
-                        try Network.Node.sendMessage(&connection, Network.Protocol.Message{
-                            .getheaders = .{
-                                .hash_count = 1,
-                                .hash_start_block = state.chain.latest_block_header,
-                                //.hash_final_block = 0x00000000839a8e6886ab5951d76f411475428afc90947ee320161bbf18eb6048, // genesis successor
-                                //.hash_final_block = 0x000000006a625f06636b8bb6ac7b960a8d03705d1ace08b1a19da3fdcc99ddbd, // genesis successor's successor
-                                .hash_final_block = 0,
-                            },
-                        });
-
-                        const message = try Network.Node.readUntilMessage(&connection, Network.Protocol.Message.headers, allocator);
-                        // var message: Network.Protocol.Message = undefined;
-                        defer message.deinit(allocator);
-                        std.debug.assert(message == .headers);
-                        const blocks = message.headers.data;
-                        try stdout.print("Blocks received ({d}):\n", .{blocks.len});
-                        try state.chain.append(blocks);
+                        requestBlocks(state, &connection, allocator) catch |err| {
+                            try stdout.print("Could not request blocks: {s}", .{@errorName(err)});
+                        };
                     },
                     '3' => {
-                        try stdout.print("Requesting for new peers...\n", .{});
-                        try Network.Node.sendMessage(&connection, Network.Protocol.Message{ .getaddr = .{} });
-                        const message = try Network.Node.readUntilMessage(&connection, Network.Protocol.Message.addr, allocator);
-                        defer message.deinit(allocator);
-                        std.debug.assert(message == .addr);
-                        try stdout.print("Success: {any}\n", .{message.addr});
+                        requestNewPeers(state, &connection, allocator) catch |err| {
+                            try stdout.print("Could not request new peers: {s}", .{@errorName(err)});
+                        };
                     },
                     else => continue,
                 }
@@ -212,7 +199,7 @@ pub fn main() !void {
                 try stdout.print("Block headers count: {d}\n", .{state.chain.block_headers_count});
 
                 if (state.chain.block_headers_count > 1)
-                    try stdout.print("Latest block hash: {x:0>64}\n", .{ state.chain.latest_block_header });
+                    try stdout.print("Latest block hash: {x:0>64}\n", .{state.chain.latest_block_header});
                 try stdout.print("========================\n", .{});
             },
             '4' => {
@@ -220,7 +207,7 @@ pub fn main() !void {
                 defer tx.deinit(allocator);
                 const input_index = 0;
                 var prompt_buf: [256]u8 = undefined;
-                const prev_pubkey = try promptBytesHex(&prompt_buf, "Previous pubkey");
+                const prev_pubkey = try Prompt.promptBytesHex(&prompt_buf, "Previous pubkey");
                 try tx.sign(state.privkey, input_index, prev_pubkey, allocator);
                 const bytes = try tx.serialize(allocator);
                 defer allocator.free(bytes);
@@ -268,14 +255,14 @@ pub fn main() !void {
 fn promptTransaction(alloc: std.mem.Allocator) !Bitcoin.Tx {
     const stdout = std.io.getStdOut().writer();
     try stdout.print("NOTE: Only P2PKH is currently supported\n", .{});
-    const testnet = try promptBool("Do you want to use testnet?");
+    const testnet = try Prompt.promptBool("Do you want to use testnet?");
     var buf: [256]u8 = undefined;
     var buf2: [256]u8 = undefined;
-    const prev_txid_bytes = try promptBytesHex(&buf, "Previous TXID (32 bytes)");
+    const prev_txid_bytes = try Prompt.promptBytesHex(&buf, "Previous TXID (32 bytes)");
     const prev_txid = try std.fmt.parseInt(u256, prev_txid_bytes[0..64], 16);
-    const prev_output_index = try promptInt(u32, "Previous output index", .{});
-    const amount = try promptInt(u64, "Amount to send", .{});
-    const target_address = try promptString(&buf2, "Target address");
+    const prev_output_index = try Prompt.promptInt(u32, "Previous output index", .{});
+    const amount = try Prompt.promptInt(u64, "Amount to send", .{});
+    const target_address = try Prompt.promptString(&buf2, "Target address", .{});
     return try Bitcoin.Tx.initP2PKH(.{
         .testnet = testnet,
         .prev_txid = prev_txid,
@@ -286,63 +273,149 @@ fn promptTransaction(alloc: std.mem.Allocator) !Bitcoin.Tx {
     });
 }
 
-fn promptBool(msg: []const u8) !bool {
-    const stdout = std.io.getStdOut().writer();
-    const stdin = std.io.getStdIn().reader();
-    try stdout.print("{s} [y/n]: ", .{msg});
-    var buf: [9]u8 = undefined;
-    const input = try stdin.readUntilDelimiter(&buf, '\n');
-    switch (input[0]) {
-        'y' => return true,
-        'n' => return false,
-        else => return error.InvalidInput,
-    }
-}
-
-fn promptBytesHex(buffer: []u8, msg: []const u8) ![]u8 {
-    const stdout = std.io.getStdOut().writer();
-    const stdin = std.io.getStdIn().reader();
-    try stdout.print("{s} [hex]: ", .{msg});
-    var answer = try stdin.readUntilDelimiter(buffer, '\n');
-    if (answer[answer.len - 1] == '\r') answer = answer[0 .. answer.len - 1];
-    return answer;
-}
-
-fn promptString(buffer: []u8, msg: []const u8) ![]u8 {
-    const stdout = std.io.getStdOut().writer();
-    const stdin = std.io.getStdIn().reader();
-    try stdout.print("{s}: ", .{msg});
-    var answer = try stdin.readUntilDelimiter(buffer, '\n');
-    if (answer[answer.len - 1] == '\r') answer = answer[0 .. answer.len - 1];
-    return answer;
-}
-
-const PromptIntOpts = struct { default_value: ?comptime_int = null };
-fn promptInt(comptime T: type, msg: []const u8, opts: PromptIntOpts) !T {
-    const stdout = std.io.getStdOut().writer();
-    const stdin = std.io.getStdIn().reader();
-    if (opts.default_value) |default| {
-        try stdout.print("{s} [numeric, default={}]: ", .{ msg, default });
-    } else {
-        try stdout.print("{s} [numeric]: ", .{msg});
-    }
-    var buf: [256]u8 = undefined;
-    var answer: []u8 = while (true) {
+const Prompt = struct {
+    fn promptBool(msg: []const u8) !bool {
+        const stdout = std.io.getStdOut().writer();
+        const stdin = std.io.getStdIn().reader();
+        try stdout.print("{s} [y/n]: ", .{msg});
+        var buf: [9]u8 = undefined;
         const input = try stdin.readUntilDelimiter(&buf, '\n');
-        if (input.len > 0 and input[0] != '\n' and input[0] != '\r') {
-            break input;
-        } else if (opts.default_value != null) {
-            break &[0]u8{};
+        switch (input[0]) {
+            'y' => return true,
+            'n' => return false,
+            else => return error.InvalidInput,
         }
-    };
-    if (answer.len == 0) return opts.default_value orelse unreachable;
-    if (answer[answer.len - 1] == '\r') answer = answer[0 .. answer.len - 1];
-    return try std.fmt.parseInt(T, answer[0..], 10);
+    }
+
+    fn promptBytesHex(buffer: []u8, msg: []const u8) ![]u8 {
+        const stdout = std.io.getStdOut().writer();
+        const stdin = std.io.getStdIn().reader();
+        try stdout.print("{s} [hex]: ", .{msg});
+        var answer = try stdin.readUntilDelimiter(buffer, '\n');
+        if (answer[answer.len - 1] == '\r') answer = answer[0 .. answer.len - 1];
+        return answer;
+    }
+
+    const PromptStringOpts = struct { default_value: ?[]const u8 = null };
+    fn promptString(buffer: []u8, msg: []const u8, opt: PromptStringOpts) ![]u8 {
+        const stdout = std.io.getStdOut().writer();
+        const stdin = std.io.getStdIn().reader();
+
+        var buf: [100]u8 = undefined;
+        var default_indicator: []u8 = &[0]u8{};
+        if (opt.default_value) |default|
+            default_indicator = try std.fmt.bufPrint(&buf, " [default={s}]", .{default});
+
+        try stdout.print("{s}{s}: ", .{ msg, default_indicator });
+        var answer = try stdin.readUntilDelimiter(buffer, '\n');
+        if (answer[answer.len - 1] == '\r') answer = answer[0 .. answer.len - 1];
+        if (answer.len == 0 and opt.default_value != null) {
+            for (opt.default_value.?, 0..) |ch, i| buffer[i] = ch;
+            return buffer[0..opt.default_value.?.len];
+        }
+
+        return answer;
+    }
+
+    const PromptIntOpts = struct { default_value: ?comptime_int = null };
+    fn promptInt(comptime T: type, msg: []const u8, opts: PromptIntOpts) !T {
+        const stdout = std.io.getStdOut().writer();
+        const stdin = std.io.getStdIn().reader();
+        if (opts.default_value) |default| {
+            try stdout.print("{s} [numeric, default={}]: ", .{ msg, default });
+        } else {
+            try stdout.print("{s} [numeric]: ", .{msg});
+        }
+        var buf: [256]u8 = undefined;
+        var answer: []u8 = while (true) {
+            const input = try stdin.readUntilDelimiter(&buf, '\n');
+            if (input.len > 0 and input[0] != '\n' and input[0] != '\r') {
+                break input;
+            } else if (opts.default_value != null) {
+                break &[0]u8{};
+            }
+        };
+        if (answer.len == 0) return opts.default_value orelse unreachable;
+        if (answer[answer.len - 1] == '\r') answer = answer[0 .. answer.len - 1];
+        return try std.fmt.parseInt(T, answer[0..], 10);
+    }
+
+    const PromptIpOpts = struct { default_value: ?[]const u8 = null };
+    fn promptIpAddress(opt: PromptIpOpts) !Address {
+        var buf: [256]u8 = undefined;
+        const ip = try promptString(&buf, "Enter the IPv4 or IPv6 [without port]", .{ .default_value = opt.default_value });
+        const port = try promptInt(u16, "Enter the port", .{ .default_value = 8333 });
+        return try Address.resolveIp(ip, port);
+    }
+};
+
+fn requestBlocks(state: *State, connection: *const Network.Node.Connection, alloc: std.mem.Allocator) !void {
+    const stdout = std.io.getStdOut().writer();
+    try stdout.print("Requesting for block headers...\n", .{});
+    try Network.Node.sendMessage(connection, Network.Protocol.Message{
+        .getheaders = .{
+            .hash_count = 1,
+            .hash_start_block = state.chain.latest_block_header,
+            //.hash_final_block = 0x00000000839a8e6886ab5951d76f411475428afc90947ee320161bbf18eb6048, // genesis successor
+            //.hash_final_block = 0x000000006a625f06636b8bb6ac7b960a8d03705d1ace08b1a19da3fdcc99ddbd, // genesis successor's successor
+            .hash_final_block = 0,
+        },
+    });
+
+    const message = try Network.Node.readUntilMessage(connection, Network.Protocol.Message.headers, alloc);
+    defer message.deinit(alloc);
+    std.debug.assert(message == .headers);
+    const blocks = message.headers.data;
+    try stdout.print("Blocks received ({d}):\n", .{blocks.len});
+    try state.chain.append(blocks);
 }
 
-fn promptIpAddress() !std.net.Address {
-    var buf: [256]u8 = undefined;
-    const ip = try promptString(&buf, "Enter the IPv4 or IPv6 [without port]");
-    const port = try promptInt(u16, "Enter the port", .{ .default_value = 8333 });
-    return try std.net.Address.resolveIp(ip, port);
+fn requestNewPeers(state: *State, connection: *const Network.Node.Connection, alloc: std.mem.Allocator) !void {
+    const stdout = std.io.getStdOut().writer();
+    if (state.active_connections >= max_connections) {
+        try stdout.print("Maximum number of connections reached: {}\n", .{max_connections});
+        return error.MaximumNumberOfConnectionsReached;
+    }
+    try stdout.print("Requesting for new peers...\n", .{});
+    try Network.Node.sendMessage(connection, Network.Protocol.Message{ .getaddr = .{} });
+    const message = try Network.Node.readUntilMessage(connection, Network.Protocol.Message.addr, alloc);
+    defer message.deinit(alloc);
+    std.debug.assert(message == .addr);
+    try stdout.print("Received {} new addresses, trying to connect...\n", .{message.addr.count});
+
+    var addr_ptr_array = try alloc.alloc(*Network.Protocol.Addr, message.addr.addr_array.len);
+    defer alloc.free(addr_ptr_array);
+    for (message.addr.addr_array, 0..) |*addr, i|
+        addr_ptr_array[i] = addr;
+    std.sort.heap(
+        *Network.Protocol.Addr,
+        addr_ptr_array,
+        {},
+        struct {
+            pub fn desc(_: void, lhs: *Network.Protocol.Addr, rhs: *Network.Protocol.Addr) bool {
+                return lhs.time > rhs.time;
+            }
+        }.desc,
+    );
+    var new_connections_count: u32 = 0;
+    for (addr_ptr_array) |addr| {
+        if (state.active_connections >= max_connections) break;
+        const address = blk: {
+            if (std.mem.eql(u8, addr.ip[0..12], &.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff })) {
+                break :blk Address.initIp4(addr.ip[12..].*, addr.port);
+            } else {
+                break :blk Address.initIp6(addr.ip, addr.port, 0, 0);
+            }
+        };
+        const connection_slot_ptr = for (&state.connections) |*conn| {
+            if (!conn.alive) break conn;
+        } else unreachable;
+        std.log.info("Connecting to {}...", .{address});
+        connection_slot_ptr.*.data = Network.Node.connect(address, app_name, alloc) catch continue;
+        connection_slot_ptr.*.alive = true;
+        state.active_connections += 1;
+        new_connections_count += 1;
+        std.log.info("Connected to {}", .{address});
+    }
+    try stdout.print("Connected to {} new peers\n", .{new_connections_count});
 }

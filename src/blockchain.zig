@@ -46,17 +46,17 @@ pub const State = struct {
 
         var prev_hash: [32]u8 = undefined;
         std.mem.writeInt(u256, &prev_hash, self.latest_block_header, .big);
-        for (blocks, 0..) |block, i| {
+        for (blocks) |block| {
             var hash: [32]u8 = undefined;
             block.hash(&hash);
             const pow = block.checkProofOfWork();
             const successive = std.mem.eql(u8, &block.prev_block, &prev_hash);
-            std.log.debug("[{d:0>7}] {s}: PoW {s}, prev {s}", .{
-                self.block_headers_count + i,
-                std.fmt.fmtSliceHexLower(hash[0..10]),
-                if (pow) "OK" else "XX",
-                if (successive) "OK" else "XX",
-            });
+            //std.log.debug("[{d:0>7}] {s}: PoW {s}, prev {s}", .{
+            //    self.block_headers_count + i,
+            //    std.fmt.fmtSliceHexLower(hash[0..10]),
+            //    if (pow) "OK" else "XX",
+            //    if (successive) "OK" else "XX",
+            //});
             if (!pow) return error.ProofOfWorkFailed;
             if (!successive) return error.NonSuccessiveBlocks;
             prev_hash = hash;

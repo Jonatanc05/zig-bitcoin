@@ -1,13 +1,21 @@
 const std = @import("std");
-const Address = std.net.Address;
-const Bitcoin = @import("bitcoin.zig");
-const Network = @import("network.zig");
-const Blockchain = @import("blockchain.zig");
+const Thread = std.Thread;
 const GenericWriter = std.io.GenericWriter;
 const GenericReader = std.io.GenericReader;
 const builtin = @import("builtin");
 
+const Bitcoin = @import("bitcoin.zig");
+const Network = @import("network.zig");
+const Blockchain = @import("blockchain.zig");
+const Address = std.net.Address;
+
+pub const std_options = std.Options{
+    .log_level = .info,
+};
+
 // TODO
+// - Concurrent connect calls
+//   - iterate on thread spawns
 // - Continous requests
 // - Check difficulty
 // - SPV
@@ -15,7 +23,9 @@ const builtin = @import("builtin");
 
 const app_name = "ZiglyNode";
 const blockheaders_filename = "blockheaders.dat";
-const max_connections = 3;
+/// This value is empirical and might change
+const max_concurrent_tasks = 12;
+const max_connections = 6;
 comptime {
     // logic for `i 2` depends on that
     std.debug.assert(max_connections < 10);
@@ -27,6 +37,8 @@ const State = struct {
     connections: [max_connections]struct { alive: bool, data: Network.Node.Connection },
     active_connections: u32,
     chain: Blockchain.State,
+    /// Use this before writing to state in a multi-threaded context
+    mutex: Thread.Mutex,
 };
 
 pub fn main() !void {
@@ -45,20 +57,22 @@ pub fn main() !void {
         }
     };
 
-    var state: *State = try allocator.create(State);
-    defer allocator.destroy(state);
+    var state_ptr: *State = try allocator.create(State);
+    defer allocator.destroy(state_ptr);
 
-    state.active_connections = 0;
-    state.privkey = try std.fmt.parseInt(u256, @embedFile(".privkey")[0..64], 16);
-    state.address = addr: {
+    state_ptr.active_connections = 0;
+    state_ptr.privkey = try std.fmt.parseInt(u256, @embedFile(".privkey")[0..64], 16);
+    state_ptr.address = addr: {
         var addr_buf: [40]u8 = undefined;
-        const address = Bitcoin.Address.fromPrivkey(state.privkey, true, &addr_buf);
+        const address = Bitcoin.Address.fromPrivkey(state_ptr.privkey, true, &addr_buf);
         break :addr try allocator.dupe(u8, address);
     };
-    defer allocator.free(state.address);
+    defer allocator.free(state_ptr.address);
 
-    state.chain = try Blockchain.State.init(allocator);
-    defer state.chain.deinit(allocator);
+    state_ptr.mutex = Thread.Mutex{};
+
+    state_ptr.chain = try Blockchain.State.init(allocator);
+    defer state_ptr.chain.deinit(allocator);
 
     read_blockheaders_from_disk: {
         const appdata_dir = try std.fs.getAppDataDir(allocator, app_name);
@@ -90,7 +104,7 @@ pub fn main() !void {
         }
 
         const blockheaders_count = blockheaders_file_size / @sizeOf(Bitcoin.Block);
-        for (state.chain.block_headers[1..][0..blockheaders_count], 0..) |*block, i| {
+        for (state_ptr.chain.block_headers[1..][0..blockheaders_count], 0..) |*block, i| {
             var block_buffer: [@sizeOf(Bitcoin.Block)]u8 = undefined;
             _ = blockheaders_file.read(&block_buffer) catch |err| {
                 std.log.err("failed to read block {d} in {s}: {s}", .{ i, blockheaders_file_path, @errorName(err) });
@@ -99,17 +113,17 @@ pub fn main() !void {
             for (std.mem.asBytes(block), std.mem.asBytes(&block_buffer)) |*out, read|
                 out.* = read;
         }
-        state.chain.block_headers_count = @intCast(blockheaders_count + 1);
-        state.chain.latest_block_header = blk: {
+        state_ptr.chain.block_headers_count = @intCast(blockheaders_count + 1);
+        state_ptr.chain.latest_block_header = blk: {
             var buf: [32]u8 = undefined;
-            state.chain.block_headers[state.chain.block_headers_count - 1].hash(&buf);
+            state_ptr.chain.block_headers[state_ptr.chain.block_headers_count - 1].hash(&buf);
             break :blk std.mem.readInt(u256, &buf, .big);
         };
     }
 
     const stdout = std.io.getStdOut().writer();
     const stdin = std.io.getStdIn().reader();
-    try stdout.print("\nYour address is {s}\n", .{state.address});
+    try stdout.print("\nYour address is {s}\n", .{state_ptr.address});
     while (true) {
         try stdout.print("\n################################################\n", .{});
         try stdout.print("\nHello dear hodler, tell me what can I do for you\n", .{});
@@ -124,23 +138,23 @@ pub fn main() !void {
         const b = input[0];
         outerswitch: switch (b) {
             '1' => {
-                const anyConnection = for (state.connections) |conn| {
+                const anyConnection = for (state_ptr.connections) |conn| {
                     if (conn.alive) break true;
                 } else false;
                 if (!anyConnection) {
                     try stdout.print("\n<empty>\n", .{});
                 } else {
                     try stdout.print("======== Peer list ========\n", .{});
-                    for (state.connections, 0..) |conn, i| {
+                    for (state_ptr.connections, 0..) |conn, i| {
                         if (conn.alive)
-                            try stdout.print("{d}: {any} | {s}\n", .{ i + 1, conn.data.peer_address, conn.data.user_agent });
+                            try stdout.print("\n{d}: {any} | {s}\n", .{ i + 1, conn.data.peer_address, conn.data.user_agent });
                     }
-                    try stdout.print("===========================\n", .{});
+                    try stdout.print("\n===========================\n", .{});
                     try stdout.print("\nType 'i' followed by a number to interact with a peer (ex.: 'i 2')\n", .{});
                 }
             },
             '2' => {
-                const new_peer_id = for (state.connections, 0..) |conn, i| {
+                const new_peer_id = for (state_ptr.connections, 0..) |conn, i| {
                     if (!conn.alive) break i;
                 } else {
                     try stdout.print("\nERROR: reached maximum number of peers\n", .{});
@@ -149,13 +163,13 @@ pub fn main() !void {
 
                 const target_ip_address = try Prompt.promptIpAddress(.{ .default_value = "127.0.0.1" });
 
-                state.connections[new_peer_id].data = try Network.Node.connect(target_ip_address, app_name, allocator);
-                state.connections[new_peer_id].alive = true;
-                state.active_connections += 1;
+                state_ptr.connections[new_peer_id].data = try Network.Node.connect(target_ip_address, app_name, allocator);
+                state_ptr.connections[new_peer_id].alive = true;
+                state_ptr.active_connections += 1;
                 try stdout.print("\nConnection established successfully with \nPeer ID: {d}\nIP: {any}\nUser Agent: {s}\n\n", .{
                     new_peer_id + 1,
-                    state.connections[new_peer_id].data.peer_address,
-                    state.connections[new_peer_id].data.user_agent,
+                    state_ptr.connections[new_peer_id].data.peer_address,
+                    state_ptr.connections[new_peer_id].data.user_agent,
                 });
             },
             'i' => {
@@ -167,10 +181,10 @@ pub fn main() !void {
                 }
 
                 const peer_id = (try std.fmt.charToDigit(trimmed[2], 10)) - 1;
-                if (!state.connections[peer_id].alive)
+                if (!state_ptr.connections[peer_id].alive)
                     try stdout.print("That's not a valid peer id\n", .{});
 
-                const connection = state.connections[peer_id].data;
+                const connection_ptr = &state_ptr.connections[peer_id].data;
                 try stdout.print("\nWhat do you want to do?\n", .{});
                 try stdout.print("1. disconnect from peer\n", .{});
                 try stdout.print("2. ask for block headers\n", .{});
@@ -178,28 +192,32 @@ pub fn main() !void {
                 const action = try stdin.readUntilDelimiter(&buf, '\n');
                 switch (action[0]) {
                     '1' => {
-                        state.connections[peer_id].alive = false;
-                        state.active_connections -= 1;
+                        state_ptr.connections[peer_id].alive = false;
+                        state_ptr.active_connections -= 1;
                     },
                     '2' => {
-                        requestBlocks(state, &connection, allocator) catch |err| {
+                        requestBlocks(state_ptr, connection_ptr, allocator) catch |err| {
                             try stdout.print("Could not request blocks: {s}", .{@errorName(err)});
                         };
                     },
                     '3' => {
-                        requestNewPeers(state, &connection, allocator) catch |err| {
-                            try stdout.print("Could not request new peers: {s}", .{@errorName(err)});
-                        };
+                        var buffer: [max_concurrent_tasks * 105]u8 = undefined; // 105 is empirical and might change
+                        var buffer_alloc = std.heap.FixedBufferAllocator.init(&buffer);
+                        var pool: Thread.Pool = undefined;
+                        try pool.init(.{ .allocator = buffer_alloc.allocator() }); // no deinit cause we're using a stack buffer
+                        try requestNewPeers(state_ptr, connection_ptr, allocator, &pool);
+                        while (pool.run_queue.popFirst() != null) {}
+                        for (pool.threads) |thr| thr.detach();
                     },
                     else => continue,
                 }
             },
             '3' => {
                 try stdout.print("\n=== Blockchain State ===\n", .{});
-                try stdout.print("Block headers count: {d}\n", .{state.chain.block_headers_count});
+                try stdout.print("Block headers count: {d}\n", .{state_ptr.chain.block_headers_count});
 
-                if (state.chain.block_headers_count > 1)
-                    try stdout.print("Latest block hash: {x:0>64}\n", .{state.chain.latest_block_header});
+                if (state_ptr.chain.block_headers_count > 1)
+                    try stdout.print("Latest block hash: {x:0>64}\n", .{state_ptr.chain.latest_block_header});
                 try stdout.print("========================\n", .{});
             },
             '4' => {
@@ -208,12 +226,13 @@ pub fn main() !void {
                 const input_index = 0;
                 var prompt_buf: [256]u8 = undefined;
                 const prev_pubkey = try Prompt.promptBytesHex(&prompt_buf, "Previous pubkey");
-                try tx.sign(state.privkey, input_index, prev_pubkey, allocator);
+                try tx.sign(state_ptr.privkey, input_index, prev_pubkey, allocator);
                 const bytes = try tx.serialize(allocator);
                 defer allocator.free(bytes);
                 try stdout.print("\nTransaction:\n{}\n", .{std.fmt.fmtSliceHexLower(bytes)});
             },
             '5' => break,
+            0x0d => return, // EndOfFile
             else => {
                 try stdout.print("\ninvalid byte read: {x}\n", .{b});
             },
@@ -240,8 +259,8 @@ pub fn main() !void {
         defer blockheaders_file.close();
 
         // Save blocks excluding genesis block (starting from index 1)
-        if (state.chain.block_headers_count > 1) {
-            for (state.chain.block_headers[1..state.chain.block_headers_count]) |block| {
+        if (state_ptr.chain.block_headers_count > 1) {
+            for (state_ptr.chain.block_headers[1..state_ptr.chain.block_headers_count]) |block| {
                 const block_bytes = std.mem.asBytes(&block);
                 _ = blockheaders_file.write(block_bytes) catch |err| {
                     std.log.err("failed to write block to {s}: {s}", .{ blockheaders_file_path, @errorName(err) });
@@ -366,22 +385,25 @@ fn requestBlocks(state: *State, connection: *const Network.Node.Connection, allo
     defer message.deinit(alloc);
     std.debug.assert(message == .headers);
     const blocks = message.headers.data;
-    try stdout.print("Blocks received ({d}):\n", .{blocks.len});
-    try state.chain.append(blocks);
+    try stdout.print("{d} new blocks received!\n", .{blocks.len});
+    {
+        state.mutex.lock();
+        defer state.mutex.unlock();
+        try state.chain.append(blocks);
+    }
 }
 
-fn requestNewPeers(state: *State, connection: *const Network.Node.Connection, alloc: std.mem.Allocator) !void {
-    const stdout = std.io.getStdOut().writer();
+fn requestNewPeers(state: *State, connection: *const Network.Node.Connection, alloc: std.mem.Allocator, pool: *std.Thread.Pool) !void {
     if (state.active_connections >= max_connections) {
-        try stdout.print("Maximum number of connections reached: {}\n", .{max_connections});
+        std.log.err("Maximum number of connections reached: {}\n", .{max_connections});
         return error.MaximumNumberOfConnectionsReached;
     }
-    try stdout.print("Requesting for new peers...\n", .{});
+    std.log.info("Requesting for new peers and connecting...", .{});
     try Network.Node.sendMessage(connection, Network.Protocol.Message{ .getaddr = .{} });
     const message = try Network.Node.readUntilMessage(connection, Network.Protocol.Message.addr, alloc);
     defer message.deinit(alloc);
     std.debug.assert(message == .addr);
-    try stdout.print("Received {} new addresses, trying to connect...\n", .{message.addr.count});
+    std.log.debug("Received {} new addresses, trying to connect...", .{message.addr.count});
 
     var addr_ptr_array = try alloc.alloc(*Network.Protocol.Addr, message.addr.addr_array.len);
     defer alloc.free(addr_ptr_array);
@@ -398,24 +420,58 @@ fn requestNewPeers(state: *State, connection: *const Network.Node.Connection, al
         }.desc,
     );
     var new_connections_count: u32 = 0;
-    for (addr_ptr_array) |addr| {
+    var event = Thread.ResetEvent{};
+    for (addr_ptr_array[0..@min(addr_ptr_array.len, max_concurrent_tasks)]) |addr| {
         if (state.active_connections >= max_connections) break;
-        const address = blk: {
-            if (std.mem.eql(u8, addr.ip[0..12], &.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff })) {
-                break :blk Address.initIp4(addr.ip[12..].*, addr.port);
-            } else {
-                break :blk Address.initIp6(addr.ip, addr.port, 0, 0);
-            }
-        };
-        const connection_slot_ptr = for (&state.connections) |*conn| {
-            if (!conn.alive) break conn;
-        } else unreachable;
-        std.log.info("Connecting to {}...", .{address});
-        connection_slot_ptr.*.data = Network.Node.connect(address, app_name, alloc) catch continue;
-        connection_slot_ptr.*.alive = true;
-        state.active_connections += 1;
-        new_connections_count += 1;
-        std.log.info("Connected to {}", .{address});
+        try pool.spawn(
+            struct {
+                fn inner(
+                    _state: *State,
+                    _addr: *const Network.Protocol.Addr,
+                    _new_connections_count: *u32,
+                    _event: *Thread.ResetEvent,
+                    _alloc: std.mem.Allocator,
+                ) void {
+                    const address = blk: {
+                        if (std.mem.eql(u8, _addr.ip[0..12], &.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff })) {
+                            break :blk Address.initIp4(_addr.ip[12..].*, _addr.port);
+                        } else {
+                            break :blk Address.initIp6(_addr.ip, _addr.port, 0, 0);
+                        }
+                    };
+                    std.log.debug("Connecting to {}...", .{address});
+                    const new_connection = Network.Node.connect(address, app_name, _alloc) catch return;
+                    const connection_slot_ptr = for (&_state.connections) |*conn| {
+                        if (!conn.alive) break conn;
+                    } else {
+                        std.log.warn("Connection to {} completed but abandoned for lack of slots", .{address});
+                        return;
+                    };
+
+                    var set_event = false;
+                    {
+                        _state.mutex.lock();
+                        defer _state.mutex.unlock();
+                        if (_state.active_connections >= max_connections) {
+                            std.log.warn("Connection to {} completed but abandoned because slots were filled while we waited for mutex lock", .{address});
+                            //_event.set();
+                            return;
+                        }
+                        connection_slot_ptr.*.data = new_connection;
+                        connection_slot_ptr.*.alive = true;
+                        _state.active_connections += 1;
+                        _new_connections_count.* += 1;
+                        set_event = _state.active_connections >= max_connections;
+                    }
+                    if (set_event) _event.set();
+                    std.log.debug("Connected to {}", .{address});
+                }
+            }.inner,
+            .{ state, addr, &new_connections_count, &event, alloc },
+        );
     }
-    try stdout.print("Connected to {} new peers\n", .{new_connections_count});
+
+    event.wait();
+
+    std.log.info("Connected to {} new peers\n", .{new_connections_count});
 }
